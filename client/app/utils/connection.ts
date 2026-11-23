@@ -25,7 +25,8 @@ export type ConnectErrorKind =
   | "forbidden"
   | "unauthorized"
   | "bad_response"
-  | "storage";
+  | "storage"
+  | "internal";
 
 export interface ConnectError {
   kind: ConnectErrorKind;
@@ -70,6 +71,11 @@ export function describeConnectError(kind: ConnectErrorKind, address: string): {
       return {
         title: "接続先をこの Mac に保存・読み出しできませんでした",
         description: "アプリを開き直しても続く時は、下の詳細を添えて知らせてください。",
+      };
+    case "internal":
+      return {
+        title: "アプリの中で通信を用意できませんでした",
+        description: "サーバーには何も送っていません。アプリを開き直しても続く時は、下の詳細を添えて知らせてください。",
       };
   }
 }

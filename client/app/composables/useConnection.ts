@@ -23,7 +23,7 @@ type Restored =
 function toConnectError(error: unknown): ConnectError {
   if (isConnectError(error)) return error;
   // Not an error from our commands (e.g. the page is open outside the app).
-  return { kind: "storage", detail: String(error) };
+  return { kind: "internal", detail: String(error) };
 }
 
 /**

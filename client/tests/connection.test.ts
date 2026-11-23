@@ -43,7 +43,7 @@ describe("connect errors", () => {
     expect(isConnectError(null)).toBe(false);
   });
   it("gives every kind of failure its own message", () => {
-    const kinds: ConnectErrorKind[] = ["invalid_input", "unreachable", "forbidden", "unauthorized", "bad_response", "storage"];
+    const kinds: ConnectErrorKind[] = ["invalid_input", "unreachable", "forbidden", "unauthorized", "bad_response", "storage", "internal"];
     const titles = kinds.map((kind) => describeConnectError(kind, "10.0.0.1:47610").title);
     expect(new Set(titles).size).toBe(kinds.length);
     expect(titles[1]).toContain("10.0.0.1:47610");

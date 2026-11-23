@@ -67,6 +67,8 @@ pub enum ErrorKind {
     BadResponse,
     /// The settings could not be read or written on this machine.
     Storage,
+    /// The request could not be prepared on this machine; nothing was sent.
+    Internal,
 }
 
 impl ConnectError {
@@ -85,7 +87,7 @@ fn client() -> Result<reqwest::Client, ConnectError> {
         .redirect(reqwest::redirect::Policy::none())
         .build()
         // Nothing was sent yet, so this is a fault on this machine, not an unreachable server.
-        .map_err(|e| ConnectError::new(ErrorKind::Storage, format!("HTTP client: {e}")))
+        .map_err(|e| ConnectError::new(ErrorKind::Internal, format!("HTTP client: {e}")))
 }
 
 /// Classifies a failed `send()`. Only the kind of failure goes into the detail, never the
@@ -98,7 +100,7 @@ fn send_error(what: &str, e: &reqwest::Error) -> ConnectError {
     } else if e.is_builder() {
         // The request could not be put together (e.g. a header value with a forbidden character),
         // so nothing left this machine: this says nothing about whether the server is reachable.
-        ConnectError::new(ErrorKind::BadResponse, format!("{what}: the request could not be built"))
+        ConnectError::new(ErrorKind::Internal, format!("{what}: the request could not be built"))
     } else if e.is_body() || e.is_decode() {
         ConnectError::new(ErrorKind::BadResponse, format!("{what}: the answer could not be read"))
     } else {
