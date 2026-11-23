@@ -5,6 +5,7 @@ import {
   describeMissingSource,
   formatDateTime,
   historySourceName,
+  missingArtifactSources,
   newestFirst,
   stepStatusText,
 } from "~/utils/requests";
@@ -23,6 +24,7 @@ const history = computed(() => newestFirst(detail.value?.history ?? []));
 const steps = computed(() => [...(detail.value?.steps ?? [])].sort((a, b) => a.position - b.position));
 const current = computed(() => currentStep(detail.value?.steps ?? []));
 const missing = computed(() => (detail.value?.missing_sources ?? []).map(describeMissingSource));
+const artifactMissing = computed(() => missingArtifactSources(detail.value?.missing_sources ?? []).map(describeMissingSource));
 const editable = computed(() => (detail.value ? canEditDraft(detail.value) : false));
 </script>
 
@@ -104,10 +106,18 @@ const editable = computed(() => (detail.value ? canEditDraft(detail.value) : fal
             </p>
           </section>
 
+          <UnsupportedNotice
+            what="承認・修正の指示・質問への回答"
+            missing="この画面からの操作（承認と修正の指示は decideApproval、質問への回答は answerQuestion。画面は未実装）"
+          />
+
           <section class="rounded-lg border border-default p-4" data-testid="artifacts">
             <h2 class="mb-2 text-sm font-semibold text-highlighted">成果物</h2>
             <div class="flex gap-3 overflow-x-auto">
-              <p class="text-sm text-muted" data-testid="artifacts-empty">成果物はまだありません。</p>
+              <p v-if="artifactMissing.length" class="text-sm text-warning" data-testid="artifacts-missing">
+                成果物の情報源が取り出せていません（{{ artifactMissing.map((m) => `${m.name}: ${m.reason}`).join("、") }}）
+              </p>
+              <p v-else class="text-sm text-muted" data-testid="artifacts-empty">成果物はまだありません。</p>
             </div>
           </section>
         </template>

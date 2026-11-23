@@ -175,3 +175,11 @@ export function stepStatusText(status: Step["status"]): string {
 export function canEditDraft(detail: Pick<RequestDetail, "allowed_operations">): boolean {
   return detail.allowed_operations.includes("save_draft");
 }
+
+/**
+ * The missing sources that hold artifacts. Artifacts live in openspec, so that is the one that
+ * counts; when it is missing the artifact area must not read as "none yet".
+ */
+export function missingArtifactSources(sources: readonly MissingSource[]): MissingSource[] {
+  return sources.filter((s) => s.service === "open_spec");
+}

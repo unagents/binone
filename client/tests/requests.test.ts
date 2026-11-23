@@ -6,6 +6,7 @@ import {
   emptyForm,
   formFromRequest,
   laneText,
+  missingArtifactSources,
   newestFirst,
   normalizeTags,
   relativeTime,
@@ -111,5 +112,16 @@ describe("describeMissingSource", () => {
     expect(d.name).toBe("openspec");
     expect(d.reason).toContain("未接続");
     expect(describeMissingSource({ service: "bantou", kind: "invalid_input", detail: "x" }).reason).toContain("未対応");
+  });
+});
+
+describe("missingArtifactSources", () => {
+  it("keeps only the source that holds artifacts", () => {
+    const sources = [
+      { service: "bantou", kind: "external_unavailable", detail: "a" },
+      { service: "open_spec", kind: "invalid_input", detail: "b" },
+    ] as const;
+    expect(missingArtifactSources([...sources]).map((s) => s.service)).toEqual(["open_spec"]);
+    expect(missingArtifactSources([])).toEqual([]);
   });
 });

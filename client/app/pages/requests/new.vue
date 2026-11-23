@@ -75,9 +75,27 @@ async function loadRequest(id: string) {
   }
 }
 
-onMounted(async () => {
-  await Promise.all([loadOptions(), loadedId.value ? loadRequest(loadedId.value) : Promise.resolve()]);
+async function loadAll(id: string | null) {
+  loading.value = true;
+  // Another request (or none): what the form held is dropped, not carried over.
+  Object.assign(form, emptyForm());
+  savedForm.value = emptyForm();
+  base.value = null;
+  lane.value = "draft";
+  savedAt.value = null;
+  actionError.value = null;
+  conflict.value = false;
+  problems.value = [];
+  await Promise.all([loadOptions(), id ? loadRequest(id) : Promise.resolve()]);
   loading.value = false;
+}
+
+onMounted(() => void loadAll(loadedId.value));
+
+// `?id=` changed to another request, or was cleared. Saving a new request sets `?id=` to the id
+// just saved (`base` already has it), which is not a change of request and must not reload.
+watch(loadedId, (id) => {
+  if (id !== (base.value?.id ?? null)) void loadAll(id);
 });
 
 const projectItems = computed(() => withCurrent(projects.value, form.project));
