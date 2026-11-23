@@ -7,6 +7,7 @@ import {
   describeEffect,
   describeMissing,
   describeSubmitCode,
+  editTargetOf,
   grabbedIds,
   runSubmitFlow,
   toggleSelected,
@@ -313,5 +314,24 @@ describe("a batch that failed after something was sent to openspec-mcp", () => {
     expect(describeEffect("rolled_back")).toBe("draft に戻しました");
     expect(describeEffect("rollback_failed")).toBe("openspec-mcp の側で open のまま残っています。binone の側は draft のままです");
     expect(describeSubmitCode("content_update_failed")).not.toBe("content_update_failed");
+  });
+});
+
+describe("the draft the editor button opens", () => {
+  const result = (id: string, code: SubmitCheck["code"]): SubmitCheck => ({ id, ok: false, code, missing: [], message: "" });
+  it("is the cause when there is one", () => {
+    const batch: SubmitBatch = { ok: false, results: [result("1", "rolled_back"), result("2", "content_update_failed")], requests: [], unreverted: [] };
+    expect(editTargetOf({ kind: "batch", failure: analyzeBatchFailure(items, batch) })?.id).toBe("2");
+  });
+  it("is the first draft named when every result was put back or not sent (no cause row)", () => {
+    const batch: SubmitBatch = { ok: false, results: [result("1", "rolled_back"), result("2", "not_attempted")], requests: [], unreverted: [] };
+    const failure = analyzeBatchFailure(items, batch);
+    expect(failure.causes).toEqual([]);
+    expect(editTargetOf({ kind: "batch", failure })?.id).toBe("1");
+  });
+  it("is the stopped draft for a refusal, and none for no problem or a read error", () => {
+    expect(editTargetOf({ kind: "refused", item: items[1]!, check: incomplete("2") })?.id).toBe("2");
+    expect(editTargetOf(null)).toBeNull();
+    expect(editTargetOf({ kind: "error", item: null, error: { kind: "internal", detail: "x" } })).toBeNull();
   });
 });

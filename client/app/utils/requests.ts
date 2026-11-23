@@ -96,28 +96,34 @@ export function addTag(tags: readonly string[], typed: string): string[] {
  * What `saveDraft` takes. A new request has no `base`; an update sends the version it read, so a
  * request that moved on in between is a conflict rather than being overwritten silently.
  *
- * An update sends only the title and the body that changed since `saved` (the server leaves out
- * what it is not given), and never a body that could not be read. Without `saved` every item that
- * may be sent is sent. A blank title is not sent on an update.
+ * The server reads a field that is left out as "not changed", and an empty value as "clear it"
+ * (`""` for the texts and the protocol, `[]` for the tags; `null` is "not changed" too). So an
+ * update sends only the items that changed since `saved`: an item the user emptied goes as an
+ * empty value, an item not touched is left out (so it is not wiped by an empty form value). The
+ * change name is not edited here and is not sent on an update. A body that could not be read is
+ * never sent, and a blank title is not sent. Without `saved` every item that may be sent is sent.
  */
 export function toDraftInput(form: DraftForm, base: DraftBase | null, versionOverride?: number, saved?: DraftForm): DraftInput {
   const protocol = form.protocol.trim();
-  const input: DraftInput = {
-    project: form.project,
-    kind: form.kind,
-    tags: normalizeTags(form.tags),
-    protocol: protocol === "" ? null : protocol,
-  };
   if (!base) {
-    input.title = form.title;
-    input.body = form.body;
-    return input;
+    return {
+      title: form.title,
+      body: form.body,
+      project: form.project,
+      kind: form.kind,
+      tags: normalizeTags(form.tags),
+      // A new request starts without one: nothing to clear.
+      protocol: protocol === "" ? null : protocol,
+    };
   }
-  input.id = base.id;
-  input.version = versionOverride ?? base.version;
-  input.change = base.change;
+  const input: DraftInput = { id: base.id, version: versionOverride ?? base.version };
+  if (!saved) input.change = base.change;
   if (form.title.trim() !== "" && (!saved || form.title !== saved.title)) input.title = form.title;
   if (!base.bodyUnreadable && (!saved || form.body !== saved.body)) input.body = form.body;
+  if (!saved || form.project !== saved.project) input.project = form.project;
+  if (!saved || form.kind !== saved.kind) input.kind = form.kind;
+  if (!saved || JSON.stringify(normalizeTags(form.tags)) !== JSON.stringify(normalizeTags(saved.tags))) input.tags = normalizeTags(form.tags);
+  if (!saved || protocol !== saved.protocol.trim()) input.protocol = protocol;
   return input;
 }
 

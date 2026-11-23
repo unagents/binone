@@ -11,6 +11,7 @@ import {
   describeEffect,
   describeMissing,
   describeSubmitCode,
+  editTargetOf,
   titleOf,
   runSubmitFlow,
   type BatchItem,
@@ -110,12 +111,7 @@ const errorText = computed(() => {
   return o && (o.status === "failed" || o.status === "unknown") ? o.error : null;
 });
 const count = computed(() => (outcome.value?.status === "submitted" ? outcome.value.batch.requests.length || props.items.length : 0));
-/** The draft to open in the editor: the one that stopped the check, or the first cause of a failed batch. */
-const editTarget = computed(() => {
-  const s = stopped.value;
-  if (!s) return null;
-  return s.kind === "batch" ? (s.failure.causes[0]?.item ?? null) : s.item;
-});
+const editTarget = computed(() => editTargetOf(stopped.value));
 const canClose = computed(() => phase.value !== "submitting");
 
 function openEditor(item: BatchItem) {

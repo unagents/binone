@@ -119,6 +119,17 @@ export function describeEffect(effect: BatchEffect): string {
   }
 }
 
+/**
+ * The draft the editor button opens: the one that stopped the check, the first cause of a failed
+ * batch, or (when every result was put back or not sent, so there is no cause row) the first
+ * draft the batch names.
+ */
+export function editTargetOf(problem: StopProblem | null): BatchItem | null {
+  if (!problem) return null;
+  if (problem.kind === "batch") return problem.failure.causes[0]?.item ?? problem.failure.effects[0]?.item ?? null;
+  return problem.item;
+}
+
 /** The title as the screens show it. */
 export function titleOf(item: BatchItem): string {
   return item.title || "（題名なし）";

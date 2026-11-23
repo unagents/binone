@@ -335,7 +335,7 @@ struct FilterArgs {
     order_by: Option<String>,
 }
 
-/// Missing `project` and `kind` are empty, like the server's own defaults: a draft may be incomplete.
+/// Every item may be left out: a draft may be incomplete, and a left-out item is "not changed".
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct SaveDraftArgs {
@@ -347,13 +347,17 @@ struct SaveDraftArgs {
     title: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     body: Option<String>,
-    #[serde(default)]
-    project: String,
-    #[serde(default)]
-    kind: String,
-    #[serde(default)]
-    tags: Vec<String>,
+    /// The same for the managed items: left out (or `null`) = not changed, an empty value
+    /// (`""`, `[]`) = cleared. A new request starts empty.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    project: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    tags: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     protocol: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     change: Option<String>,
 }
 
@@ -526,7 +530,7 @@ mod tests {
         // Nothing said about the title and the body: neither is sent (an empty one would replace it).
         assert_eq!(
             p.variables,
-            json!({ "input": { "id": null, "version": null, "project": "", "kind": "", "tags": [], "protocol": null, "change": null } })
+            json!({ "input": { "id": null, "version": null } })
         );
         let p = prepare("saveDraft", json!({ "id": "r1", "version": 3, "title": "t", "tags": ["a"] })).unwrap();
         assert_eq!(p.variables["input"]["id"], "r1");
@@ -548,6 +552,20 @@ mod tests {
         // `null` is "not given" too (never a value that reaches the server as an empty text).
         let p = prepare("saveDraft", json!({ "id": "r1", "version": 3, "body": null })).unwrap();
         assert!(!p.variables["input"].as_object().unwrap().contains_key("body"));
+    }
+
+    #[test]
+    fn an_emptied_item_is_sent_empty_and_one_left_out_is_not_sent() {
+        let p = prepare("saveDraft", json!({ "id": "r1", "version": 3, "protocol": "", "tags": [], "project": "", "kind": "", "change": "" })).unwrap();
+        assert_eq!(
+            p.variables["input"],
+            json!({ "id": "r1", "version": 3, "project": "", "kind": "", "tags": [], "protocol": "", "change": "" })
+        );
+        let p = prepare("saveDraft", json!({ "id": "r1", "version": 3, "kind": "bug" })).unwrap();
+        assert_eq!(p.variables["input"], json!({ "id": "r1", "version": 3, "kind": "bug" }));
+        // `null` is "not changed", as the server reads it: it is not turned into an empty value.
+        let p = prepare("saveDraft", json!({ "id": "r1", "version": 3, "protocol": null, "tags": null })).unwrap();
+        assert_eq!(p.variables["input"], json!({ "id": "r1", "version": 3 }));
     }
 
     #[test]

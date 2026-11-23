@@ -67,7 +67,9 @@ describe("a body that cannot be read is never written back empty", () => {
     expect(form.body).toBe("");
     const input = toDraftInput(form, baseFromRequest(unreadable), undefined, formFromRequest(unreadable));
     expect("body" in input).toBe(false);
-    expect(input).toMatchObject({ id: "r1", version: 4, title: "新しい題名", kind: "bug", project: "p" });
+    expect(input).toMatchObject({ id: "r1", version: 4, title: "新しい題名", kind: "bug" });
+    // project did not change: left out ("not changed"), not sent again.
+    expect("project" in input).toBe(false);
   });
 
   it("is not sent even when the form somehow holds a body", () => {
@@ -245,5 +247,47 @@ describe("describeBodyUnreadable", () => {
     expect(describeBodyUnreadable([])).toBe(BODY_UNREADABLE_TEXT);
     expect(describeBodyUnreadable(undefined)).toBe(BODY_UNREADABLE_TEXT);
     expect(describeBodyUnreadable(body("something_new", " "))).toBe(BODY_UNREADABLE_TEXT);
+  });
+});
+
+describe("what the user emptied is cleared, what was not touched is not sent", () => {
+  const saved = formFromRequest({ ...readable, protocol: "proto", tags: ["x", "y"], kind: "task", project: "p" });
+  const base = baseFromRequest(readable);
+  const sentArgs = async (form: typeof saved) => {
+    const calls = nativeSide(() => ({ ...readable, version: 5 }));
+    await saveOnce((input) => callApi("saveDraft", input), form, base, saved);
+    expect(calls).toHaveLength(1);
+    return calls[0]?.args as Record<string, unknown>;
+  };
+
+  it("sends an emptied protocol as an empty text, not as null (null means not changed)", async () => {
+    const args = await sentArgs({ ...saved, protocol: "" });
+    expect(args.protocol).toBe("");
+    expect(Object.keys(args).sort()).toEqual(["id", "protocol", "version"]);
+    expect((await sentArgs({ ...saved, protocol: "   " })).protocol).toBe("");
+  });
+
+  it("sends every emptied item in the contract's empty form", async () => {
+    const args = await sentArgs({ ...saved, project: "", kind: "", tags: [], protocol: "" });
+    expect(args).toMatchObject({ project: "", kind: "", tags: [], protocol: "" });
+    expect(Object.keys(args)).not.toContain("title");
+    expect(Object.keys(args)).not.toContain("body");
+    expect(Object.keys(args)).not.toContain("change");
+  });
+
+  it("leaves out the items that did not change, an empty one included", async () => {
+    const emptySaved = { ...saved, protocol: "", tags: [] as string[] };
+    const input = toDraftInput({ ...emptySaved, kind: "bug" }, base, undefined, emptySaved);
+    expect(input).toEqual({ id: "r1", version: 4, kind: "bug" });
+    expect(toDraftInput(saved, base, undefined, saved)).toEqual({ id: "r1", version: 4 });
+  });
+
+  it("sends the tags that changed as they are, and notes a tag change that only normalizes as no change", () => {
+    expect(toDraftInput({ ...saved, tags: ["x"] }, base, undefined, saved).tags).toEqual(["x"]);
+    expect("tags" in toDraftInput({ ...saved, tags: [" x ", "y", "x"] }, base, undefined, saved)).toBe(false);
+  });
+
+  it("does not send a protocol for a new request that has none", () => {
+    expect(toDraftInput({ ...emptyForm("p"), title: "t" }, null).protocol).toBeNull();
   });
 });
