@@ -134,6 +134,15 @@ describe("a missing source with a reason", () => {
     expect(missingReasonText("show_unsupported")).toContain("未対応");
   });
 
+  it("does not give a body's reason to another item", () => {
+    for (const item of ["title", "tags", undefined, null]) {
+      const source = { item, service: "open_spec", kind: "external_unavailable", detail: "x", reason: "show_unsupported" } as const;
+      expect(describeMissingSource(source).reason).toBe("未接続（届きません）");
+    }
+    const other = { item: "title", service: "bantou", kind: "internal", detail: "x", reason: "not_found" } as const;
+    expect(describeMissingSource(other).reason).toBe("読み出しに失敗しました");
+  });
+
   it("keeps the kind's wording without a reason, or with one not known here", () => {
     expect(missingReasonText(undefined)).toBeUndefined();
     expect(missingReasonText(null)).toBeUndefined();

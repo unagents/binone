@@ -77,10 +77,20 @@ impl ConnectError {
     }
 }
 
+/// The time a request may take: `REQUEST_TIMEOUT`, or (under test, on this thread only) what
+/// `testing::allow_slow_requests` set.
+fn request_timeout() -> Duration {
+    #[cfg(test)]
+    if let Some(limit) = testing::REQUEST_TIMEOUT_OVERRIDE.with(std::cell::Cell::get) {
+        return limit;
+    }
+    REQUEST_TIMEOUT
+}
+
 pub(crate) fn client() -> Result<reqwest::Client, ConnectError> {
     reqwest::Client::builder()
         .connect_timeout(CONNECT_TIMEOUT)
-        .timeout(REQUEST_TIMEOUT)
+        .timeout(request_timeout())
         // The server is addressed by IP on the user's network; a system proxy must not sit between.
         .no_proxy()
         // Never follow a redirect: the key must not travel to an address the user did not enter.
@@ -225,6 +235,18 @@ pub async fn resume(endpoint: &Endpoint, key: &str) -> Result<(String, String), 
 /// Stand-ins for the server, shared by the tests of this crate.
 #[cfg(test)]
 pub(crate) mod testing {
+    use std::cell::Cell;
+    use std::time::Duration;
+
+    thread_local! {
+        pub(super) static REQUEST_TIMEOUT_OVERRIDE: Cell<Option<Duration>> = const { Cell::new(None) };
+    }
+
+    /// For a test whose result must not depend on how fast the machine is: requests made from this
+    /// thread get a long time-out instead of the short one used under test (other tests keep theirs).
+    pub fn allow_slow_requests() {
+        REQUEST_TIMEOUT_OVERRIDE.with(|limit| limit.set(Some(Duration::from_secs(120))));
+    }
     use super::*;
     use std::io::{Read, Write};
     use std::net::{TcpListener, TcpStream};

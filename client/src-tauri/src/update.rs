@@ -3,8 +3,8 @@
 //! Both happen on this side: the webview never reaches GitHub and never starts a program. The
 //! latest release is read from GitHub's public API without credentials; the update refreshes the
 //! tap `unagents/tap` with git, runs `brew upgrade --cask binone` and then reads the installed
-//! version back, with each program and its arguments given separately (no shell). Nothing here touches the app's data directory, where the connection
-//! settings and the key are kept.
+//! version back, with each program and its arguments given separately (no shell). Nothing here
+//! touches the app's data directory, where the connection settings and the key are kept.
 //!
 //! What touches the outside (the HTTP answer, running a program, the file system) is passed in
 //! as an argument or a trait, so the decisions can be tested without a network or a real brew.
@@ -29,15 +29,22 @@ const CASK: &str = "binone";
 /// The tap that holds the cask: only this one is refreshed (not every tap, as `brew update` would).
 const TAP: &str = "unagents/tap";
 const GIT: &str = "/usr/bin/git";
-/// Set for the upgrade: the tap was refreshed above, and an automatic update of every tap is what failed on a user's Mac.
+/// Tells whether the Command Line Tools are installed (without them `git` is a shim that opens an
+/// installer dialog instead of running).
+const XCODE_SELECT: &str = "/usr/bin/xcode-select";
 const UPGRADE_ARGS: [&str; 3] = ["upgrade", "--cask", CASK];
+/// Set for the upgrade: the tap was refreshed above, and an automatic update of every tap is what
+/// failed on a user's Mac.
 const UPGRADE_ENV: [(&str, &str); 1] = [("HOMEBREW_NO_AUTO_UPDATE", "1")];
-/// Looked for in this order (the first is preferred when both have the cask); `PATH` is not consulted (an app started from Finder has a short one).
+/// Looked for in this order (the first is preferred when both have the cask); `PATH` is not
+/// consulted (an app started from Finder has a short one).
 const BREW_CANDIDATES: [&str; 2] = ["/opt/homebrew/bin/brew", "/usr/local/bin/brew"];
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 /// The whole update (the choice of brew, the tap, the upgrade and the check of the result) may take this long.
 pub const UPDATE_TIME_LIMIT: Duration = Duration::from_secs(10 * 60);
+/// The `git pull` of the tap: a tap that cannot be reached must not use up the time of the upgrade.
+pub const TAP_PULL_TIME_LIMIT: Duration = Duration::from_secs(60);
 /// Each brew call made to find out how to update (`brew list --cask binone`, once per brew).
 pub const LIST_TIME_LIMIT: Duration = Duration::from_secs(10);
 /// After a time-out: how long the program gets to end on TERM before the whole group is killed.
@@ -313,8 +320,8 @@ impl Runner for SystemRunner {
         #[cfg(unix)]
         std::os::unix::process::CommandExt::process_group(&mut command, 0);
         let mut child = command.spawn().map_err(started)?;
-        let (stdout, out_reader) = collect(child.stdout.take().ok_or("no standard output")?);
-        let (stderr, err_reader) = collect(child.stderr.take().ok_or("no standard error")?);
+        let (stdout, out_reader) = collect(child.stdout.take().ok_or("標準出力を取得できませんでした")?);
+        let (stderr, err_reader) = collect(child.stderr.take().ok_or("標準エラー出力を取得できませんでした")?);
         let deadline = Instant::now() + limit;
         let (code, timed_out) = loop {
             match child.try_wait() {
@@ -436,8 +443,9 @@ fn last_line(text: &str) -> Option<&str> {
     text.lines().map(str::trim).rfind(|line| !line.is_empty())
 }
 
-/// Refreshes the tap with git: `brew --repo unagents/tap` for its directory, then `git pull
-/// --ff-only` in it. It never stops the update; what went wrong is returned as a sentence.
+/// Refreshes the tap with git: `brew --repo unagents/tap` for its directory, `xcode-select -p`
+/// for the Command Line Tools, then `git pull --ff-only` in it (at most
+/// `TAP_PULL_TIME_LIMIT`). It never stops the update; what went wrong is returned as a sentence.
 fn refresh_tap(brew: &Path, runner: &dyn Runner, deadline: Instant) -> Option<String> {
     let left = || deadline.saturating_duration_since(Instant::now());
     let why = |reason: String| Some(format!("tap {TAP} は更新できませんでした（{reason}）。"));
@@ -450,9 +458,17 @@ fn refresh_tap(brew: &Path, runner: &dyn Runner, deadline: Instant) -> Option<St
     let Some(dir) = dir else {
         return why("tap の場所が分かりません".into());
     };
-    match runner.run(Path::new(GIT), &["-C", &dir, "pull", "--ff-only"], &[], left()) {
+    // Without the Command Line Tools `git` would open an installer dialog: it is not called then.
+    let tools_note = || Some("Command Line Tools が無いので tap の更新を省いた（git は呼んでいません）。".to_owned());
+    match runner.run(Path::new(XCODE_SELECT), &["-p"], &[], left().min(LIST_TIME_LIMIT)) {
+        Ok(RunOutput { code: Some(0), timed_out: false, .. }) => {}
+        Ok(RunOutput { timed_out: true, .. }) => return why("Command Line Tools の有無を調べている間に時間切れになりました".into()),
+        // A non-zero code, or no such program: they are not there.
+        Ok(_) | Err(_) => return tools_note(),
+    }
+    match runner.run(Path::new(GIT), &["-C", &dir, "pull", "--ff-only"], &[], left().min(TAP_PULL_TIME_LIMIT)) {
         Ok(RunOutput { code: Some(0), timed_out: false, .. }) => None,
-        Ok(RunOutput { timed_out: true, .. }) => why("git pull が時間切れになりました".into()),
+        Ok(RunOutput { timed_out: true, .. }) => why(format!("tap の更新が時間切れになりました（git pull は {} 秒まで）", TAP_PULL_TIME_LIMIT.as_secs())),
         Ok(RunOutput { code, .. }) => why(match code {
             Some(code) => format!("git pull が終了 code {code} で失敗しました"),
             None => "git pull が途中で止まりました".to_owned(),
@@ -756,10 +772,11 @@ mod tests {
     const INTEL: &str = "/usr/local/bin/brew";
     const TAP_DIR: &str = "/opt/homebrew/Library/Taps/unagents/homebrew-tap";
     const BUNDLE: &str = "/Applications/binone.app";
+    const TOOLS_DIR: &str = "/Library/Developer/CommandLineTools";
 
     /// The calls of a whole update when everything goes well, up to the upgrade's answer.
     fn tap_ok() -> Vec<Result<RunOutput, String>> {
-        vec![out(0, &format!("{TAP_DIR}\n")), out(0, "Already up to date.")]
+        vec![out(0, &format!("{TAP_DIR}\n")), out(0, TOOLS_DIR), out(0, "Already up to date.")]
     }
 
     fn update_script(upgrade: Result<RunOutput, String>, installed: Result<RunOutput, String>) -> Fake {
@@ -856,6 +873,7 @@ mod tests {
             *fake.calls.borrow(),
             [
                 format!("{BREW} --repo unagents/tap"),
+                "/usr/bin/xcode-select -p".to_owned(),
                 format!("/usr/bin/git -C {TAP_DIR} pull --ff-only"),
                 format!("{BREW} upgrade --cask binone"),
                 format!("{BREW} list --cask --versions binone"),
@@ -873,20 +891,20 @@ mod tests {
         let fake = update_script(out(0, ""), out(0, "binone 0.3.0"));
         run_update(&brew(), "0.3.0", &fake, LIMIT);
         let envs = fake.envs.borrow();
-        assert_eq!(envs[2], [("HOMEBREW_NO_AUTO_UPDATE".to_owned(), "1".to_owned())]);
-        assert!(envs[0].is_empty() && envs[1].is_empty() && envs[3].is_empty(), "{envs:?}");
+        assert_eq!(envs[3], [("HOMEBREW_NO_AUTO_UPDATE".to_owned(), "1".to_owned())]);
+        assert!(envs[0].is_empty() && envs[1].is_empty() && envs[2].is_empty() && envs[4].is_empty(), "{envs:?}");
         assert_eq!(UPGRADE_ENV, [("HOMEBREW_NO_AUTO_UPDATE", "1")]);
     }
 
     #[test]
     fn a_tap_that_cannot_be_refreshed_does_not_stop_the_upgrade() {
         // `git pull` fails.
-        let fake = Fake::new(vec![out(0, TAP_DIR), out(1, "fatal: Not possible to fast-forward"), out(0, ""), out(0, "binone 0.3.0")]);
+        let fake = Fake::new(vec![out(0, TAP_DIR), out(0, TOOLS_DIR), out(1, "fatal: Not possible to fast-forward"), out(0, ""), out(0, "binone 0.3.0")]);
         let (ok, _, _, _, _, note) = finished(run_update(&brew(), "0.3.0", &fake, LIMIT));
         assert!(ok);
         let note = note.unwrap();
         assert!(note.contains("unagents/tap") && note.contains("終了 code 1"), "{note}");
-        assert_eq!(fake.calls.borrow().len(), 4);
+        assert_eq!(fake.calls.borrow().len(), 5);
         // The tap's directory cannot be had: git is not run.
         for bad in [out(1, "Error: No available tap"), out(0, "  \n"), Err("起動できません".to_owned())] {
             let fake = Fake::new(vec![bad, out(0, ""), out(0, "binone 0.3.0")]);
@@ -896,7 +914,7 @@ mod tests {
         }
         // git cannot start, or runs out of time.
         for bad in [Err("git を起動できませんでした".to_owned()), stopped("")] {
-            let fake = Fake::new(vec![out(0, TAP_DIR), bad, out(0, ""), out(0, "binone 0.3.0")]);
+            let fake = Fake::new(vec![out(0, TAP_DIR), out(0, TOOLS_DIR), bad, out(0, ""), out(0, "binone 0.3.0")]);
             let (ok, _, _, _, _, note) = finished(run_update(&brew(), "0.3.0", &fake, LIMIT));
             assert!(ok && note.is_some());
         }
@@ -908,11 +926,44 @@ mod tests {
     }
 
     #[test]
+    fn a_pull_that_hangs_is_given_a_minute_and_the_upgrade_still_runs() {
+        let fake = Fake::new(vec![out(0, TAP_DIR), out(0, TOOLS_DIR), stopped(""), out(0, ""), out(0, "binone 0.3.0")]);
+        let (ok, _, _, _, timed_out, note) = finished(run_update(&brew(), "0.3.0", &fake, LIMIT));
+        assert!(ok && !timed_out);
+        assert!(note.unwrap().contains("tap の更新が時間切れ"));
+        let limits = fake.limits.borrow();
+        assert_eq!(limits[2], Duration::from_secs(60));
+        assert!(limits[3] > Duration::from_secs(60), "{limits:?}");
+        // The whole limit still caps the step.
+        let short = Fake::new(vec![out(0, TAP_DIR), out(0, TOOLS_DIR), stopped(""), stopped(""), out(0, "")]);
+        run_update(&brew(), "0.3.0", &short, Duration::from_secs(30));
+        assert!(short.limits.borrow()[2] <= Duration::from_secs(30));
+    }
+
+    #[test]
+    fn without_the_command_line_tools_git_is_not_called_and_the_upgrade_runs() {
+        for missing in [out(2, "xcode-select: error: unable to get active developer directory"), Err("起動できませんでした".to_owned())] {
+            let fake = Fake::new(vec![out(0, TAP_DIR), missing, out(0, ""), out(0, "binone 0.3.0")]);
+            let (ok, _, _, _, _, note) = finished(run_update(&brew(), "0.3.0", &fake, LIMIT));
+            assert!(ok);
+            assert!(note.unwrap().contains("Command Line Tools が無いので tap の更新を省いた"));
+            let calls = fake.calls.borrow();
+            assert_eq!(calls[1], "/usr/bin/xcode-select -p");
+            assert!(!calls.iter().any(|c| c.contains("git")), "{calls:?}");
+            assert_eq!(calls.len(), 4);
+        }
+        // Without the tap's directory, xcode-select is not asked either (brew --repo, xcode-select, git).
+        let fake = Fake::new(vec![out(1, ""), out(0, ""), out(0, "binone 0.3.0")]);
+        run_update(&brew(), "0.3.0", &fake, LIMIT);
+        assert!(!fake.calls.borrow().iter().any(|c| c.contains("xcode-select")));
+    }
+
+    #[test]
     fn the_path_of_the_tap_is_a_single_argument() {
         // A directory with blanks or shell characters stays one argument of git (no shell is used).
-        let fake = Fake::new(vec![out(0, "warning: x\n/Users/a b/Taps/$(x);y\n"), out(0, ""), out(0, ""), out(0, "binone 0.3.0")]);
+        let fake = Fake::new(vec![out(0, "warning: x\n/Users/a b/Taps/$(x);y\n"), out(0, TOOLS_DIR), out(0, ""), out(0, ""), out(0, "binone 0.3.0")]);
         run_update(&brew(), "0.3.0", &fake, LIMIT);
-        assert_eq!(fake.calls.borrow()[1], "/usr/bin/git -C /Users/a b/Taps/$(x);y pull --ff-only");
+        assert_eq!(fake.calls.borrow()[2], "/usr/bin/git -C /Users/a b/Taps/$(x);y pull --ff-only");
     }
 
     #[test]
@@ -920,7 +971,7 @@ mod tests {
         let fake = update_script(out(1, "Error: Cask 'binone' is not installed"), out(0, ""));
         let outcome = run_update(&brew(), "0.3.0", &fake, LIMIT);
         // No look at the version after a failure.
-        assert_eq!(fake.calls.borrow().len(), 3);
+        assert_eq!(fake.calls.borrow().len(), 4);
         assert_eq!(
             outcome,
             UpdateOutcome::Finished { ok: false, code: Some(1), step: "brew upgrade --cask binone".into(), output: "Error: Cask 'binone' is not installed".into(), timed_out: false, note: None }
@@ -942,7 +993,7 @@ mod tests {
         assert!(!ok && timed_out && code.is_none());
         assert_eq!(step, "brew upgrade --cask binone");
         assert!(output.contains("still going"));
-        assert_eq!(fake.calls.borrow().len(), 3);
+        assert_eq!(fake.calls.borrow().len(), 4);
         let text = serde_json::to_string(&run_update(&brew(), "0.3.0", &update_script(stopped(""), out(0, "")), LIMIT)).unwrap();
         assert!(text.contains(r#""timed_out":true"#), "{text}");
     }
@@ -996,13 +1047,16 @@ mod tests {
         let fake = update_script(out(0, ""), out(0, "binone 0.3.0"));
         run_update(&brew(), "0.3.0", &fake, LIMIT);
         let limits = fake.limits.borrow();
-        assert_eq!(limits.len(), 4);
+        // brew --repo, xcode-select, git pull, the upgrade, the version.
+        assert_eq!(limits.len(), 5);
         assert!(limits[0] <= LIMIT && limits[0] > LIMIT - Duration::from_secs(5));
-        assert!(limits.windows(2).all(|w| w[1] <= w[0]), "{limits:?}");
+        // What is left of the whole limit only shrinks; xcode-select and git have caps of their own.
+        assert!(limits[3] <= limits[0] && limits[4] <= limits[3], "{limits:?}");
+        assert!(limits[1] <= LIST_TIME_LIMIT && limits[2] <= TAP_PULL_TIME_LIMIT, "{limits:?}");
         // A limit already used up leaves nothing for the next step.
         let fake = update_script(out(0, ""), out(0, ""));
         run_update(&brew(), "0.3.0", &fake, Duration::ZERO);
-        assert_eq!(*fake.limits.borrow(), [Duration::ZERO; 4]);
+        assert_eq!(*fake.limits.borrow(), [Duration::ZERO; 5]);
     }
 
     #[test]
@@ -1016,7 +1070,8 @@ mod tests {
         assert!(matches!(outcome, UpdateOutcome::Finished { ok: true, .. }), "{outcome:?}");
         let limits = fake.limits.borrow();
         assert_eq!((limits[0], limits[1]), (LIST_TIME_LIMIT, LIST_TIME_LIMIT));
-        assert!(limits[2] <= LIMIT && limits.windows(2).skip(2).all(|w| w[1] <= w[0]), "{limits:?}");
+        // brew --repo, then the upgrade and the version (xcode-select and git have caps of their own).
+        assert!(limits[2] <= LIMIT && limits[5] <= limits[2] && limits[6] <= limits[5], "{limits:?}");
         // A limit shorter than the list limit caps the list calls too.
         let short = Fake::new(vec![stopped(""), stopped("")]);
         detect_and_update(Some(Path::new(BUNDLE)), "0.3.0", &|_| true, &short, Duration::from_secs(3));

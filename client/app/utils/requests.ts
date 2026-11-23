@@ -253,8 +253,9 @@ const SERVICE_NAMES: Record<string, string> = { bantou: "bantou", open_spec: "op
  * the two never disagree; without one, the cause is told from the kind of the failure.
  */
 export function describeMissingSource(source: MissingSource): { name: string; reason: string; detail: string } {
+  // The reasons are the body's: on another item (the title...) they would say the body is unreadable.
   const reason =
-    missingReasonText(source.reason) ??
+    (source.item === "body" ? missingReasonText(source.reason) : undefined) ??
     (source.kind === "external_unavailable"
       ? "未接続（届きません）"
       : source.kind === "invalid_input" || source.kind === "not_found"

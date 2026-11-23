@@ -1,15 +1,17 @@
 <script setup lang="ts">
 import { formatDateTime, relativeTime } from "~/utils/requests";
 import { requestRoute } from "~/utils/routes";
+import { allProjectsValue, projectFromSelect, projectToSelect } from "~/utils/swimlane";
 import type { RequestSummary } from "~/types/binone";
 
 const api = useApi();
-const ALL = "__all__";
-const project = ref(ALL);
+// `null` is "all projects"; no project name can be mistaken for it. The select needs a value of its
+// own for that choice, which `allProjectsValue` keeps apart from every project name.
+const project = ref<string | null>(null);
 
 // The lanes' labels come from the settings; when they cannot be read the lane names are shown.
 const { data, error, loading, reload } = useScreenData(async () => {
-  const filter = project.value === ALL ? null : { project: project.value };
+  const filter = project.value === null ? null : { project: project.value };
   const [rows, lanes, projects] = await Promise.all([
     api.requests({ filter }),
     api.settings().then((v) => v.settings.lanes).catch(() => null),
@@ -18,10 +20,18 @@ const { data, error, loading, reload } = useScreenData(async () => {
   return { rows, lanes, projects };
 });
 
+const projectNames = computed(() => (data.value?.projects ?? []).filter((p) => p !== ""));
+const allValue = computed(() => allProjectsValue(projectNames.value));
 const projectItems = computed(() => [
-  { label: "すべてのプロジェクト", value: ALL },
-  ...(data.value?.projects ?? []).map((p) => ({ label: p, value: p })),
+  { label: "すべてのプロジェクト", value: allValue.value },
+  ...projectNames.value.map((p) => ({ label: p, value: p })),
 ]);
+const selected = computed({
+  get: () => projectToSelect(project.value, allValue.value),
+  set: (value: string | null | undefined) => {
+    project.value = projectFromSelect(value, allValue.value);
+  },
+});
 watch(project, () => void reload());
 const now = Date.now();
 
@@ -35,7 +45,7 @@ function open(row: RequestSummary) {
     <div class="min-w-0 flex-1 overflow-y-auto">
       <ScreenFrame title="依頼の一覧" description="依頼とその状態（レーン）。選ぶと依頼の状況（draft は登録の画面）を開きます。" wide>
         <template #actions>
-          <USelect v-model="project" :items="projectItems" size="sm" class="w-48" aria-label="プロジェクトで絞る" data-testid="project-filter" />
+          <USelect v-model="selected" :items="projectItems" size="sm" class="w-48" aria-label="プロジェクトで絞る" data-testid="project-filter" />
           <UButton color="neutral" variant="outline" size="sm" :loading="loading" data-testid="reload" @click="reload">読み込み直す</UButton>
           <UButton size="sm" to="/requests/new" data-testid="new-request">依頼を登録</UButton>
         </template>

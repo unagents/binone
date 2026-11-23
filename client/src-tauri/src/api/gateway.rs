@@ -139,7 +139,7 @@ fn read_failure(_: &reqwest::Error, mutation: bool) -> ApiError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::server::testing::{redirect_to, run, silent, stub, stub_with_bodies};
+    use crate::server::testing::{allow_slow_requests, redirect_to, run, silent, stub, stub_with_bodies};
     use crate::storage::testing::TestDir;
     use serde_json::json;
     use std::net::TcpListener;
@@ -396,6 +396,9 @@ mod tests {
 
     #[test]
     fn parallel_calls_that_fail_with_401_share_one_new_key() {
+        // The three calls go through one single-threaded stub; how long that takes on a busy
+        // machine must not decide the result.
+        allow_slow_requests();
         let dir = TestDir::new();
         let (endpoint, seen) = stub(|path: &str, auth: Option<&str>| match path {
             "/key" => (200, format!(r#"{{"key":"{NEW_KEY}"}}"#)),

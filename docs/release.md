@@ -2,8 +2,9 @@
 
 The client app (`client/`) is distributed as a Homebrew cask for Apple Silicon Macs
 (macOS 15 Sequoia or later). The app is ad-hoc signed; the cask removes the quarantine
-attribute when it installs the app. The app has no auto-updater (no Tauri updater plugin, no update signing key): it checks for a newer
-version and runs the brew update when asked (see "Checking and updating from the app").
+attribute when it installs the app. The app has no auto-updater (no Tauri updater plugin, no
+update signing key): it checks for a newer version and, when asked, refreshes only the tap with
+git and runs `brew upgrade --cask binone` (see "Checking and updating from the app").
 
 ## Install (on the user's Mac)
 
@@ -44,22 +45,25 @@ one that exists whether it has the cask (`brew list --cask binone` succeeds, wit
 limit for each call), for an app that is an app bundle. When both have it, the one whose list names
 the running app's bundle is used, and `/opt/homebrew` when that cannot be told. With one, "更新" is
 shown. The update runs these, as program-and-arguments and not through a shell: the tap's
-directory (`brew --repo unagents/tap`) and `git pull --ff-only` in it, so that only that tap is
-refreshed (not `brew update`, which refreshes every tap); then `brew upgrade --cask binone` with
-`HOMEBREW_NO_AUTO_UPDATE=1`; then `brew list --cask --versions binone`. The update counts as done
-only when the installed version is the latest one the check found: when it is not (brew ended with
-code 0 and did nothing) the screen says it was not updated, with both versions, and when the
-installed version cannot be read it says that this could not be confirmed. A tap that cannot be
-refreshed does not stop the update; the screen says so after the result. The whole update, the
-judgment above included, has 10 minutes in all. When it runs out of time everything it started is
-stopped with it, child processes too (the whole process group: TERM first, then KILL after a short
-grace), and reaped; the screen says the update ran out of time and shows the end of the output so
-far, and "更新" can be pressed again. A failure shows the exit code and the end of the output; a
+directory (`brew --repo unagents/tap`); `/usr/bin/xcode-select -p`, to see that the Command Line
+Tools are there (without them `git` only opens an installer dialog, so it is not called, and the
+screen says the tap was left alone); and `git pull --ff-only` in the tap's directory (60 seconds
+at most; when it runs out the upgrade goes on and the screen says the tap's update timed out), so
+that only that tap is refreshed (not `brew update`, which refreshes every tap); then `brew upgrade
+--cask binone` with `HOMEBREW_NO_AUTO_UPDATE=1`; then `brew list --cask --versions binone`. The
+update counts as done only when the installed version is the latest one the check found: when it is
+not (brew ended with code 0 and did nothing) the screen says it was not updated, with both versions,
+and when the installed version cannot be read it says that this could not be confirmed. A tap that
+cannot be refreshed does not stop the update; the screen says so after the result. The whole update,
+the judgment above included, has 10 minutes in all. When it runs out of time everything it started
+is stopped with it, child processes too (the whole process group: TERM first, then KILL after a
+short grace), and reaped; the screen says the update ran out of time and shows the end of the output
+so far, and "更新" can be pressed again. A failure shows the exit code and the end of the output; a
 button starts the app again after a success (it never restarts by itself). Without Homebrew, or for
-an app that the cask did not install (a development build, or a cask in neither Homebrew), "更新"
-is not shown and nothing is run: the screen offers, as soon as the newer version is known, the
-release page in the default browser and the command `brew upgrade --cask binone`. The update does
-not touch the app's data directory, so the saved address and key stay.
+an app that the cask did not install (a development build, or a cask in neither Homebrew), "更新" is
+not shown and nothing is run: the screen offers, as soon as the newer version is known, the release
+page in the default browser and the command `brew upgrade --cask binone`. The update does not touch
+the app's data directory, so the saved address and key stay.
 
 With `NUXT_PUBLIC_SAMPLE_DATA=1` the states can be drawn with `?sample-update=latest`,
 `?sample-update=available` (update by Homebrew), `?sample-update=manual` (newer, by hand) and
