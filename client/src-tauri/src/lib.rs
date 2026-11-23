@@ -4,6 +4,7 @@
 mod api;
 mod server;
 mod storage;
+mod update;
 
 use std::net::Ipv4Addr;
 use std::path::{Path, PathBuf};
@@ -118,10 +119,62 @@ async fn api_call(
     gateway.call(&settings, &op, args).await
 }
 
+/// The version check: the running version against the latest published release. It never fails
+/// as a command; a failure is an `unknown` answer with its reason.
+#[tauri::command]
+async fn check_update(app: AppHandle) -> update::UpdateCheck {
+    update::check(&app.package_info().version.to_string(), update::fetch_latest).await
+}
+
+/// The update through Homebrew, or `manual` when it cannot be run from here (no Homebrew, or
+/// this app was not installed by the cask). One at a time.
+#[tauri::command]
+async fn run_update(gate: State<'_, update::UpdateGate>) -> Result<update::UpdateOutcome, String> {
+    let Some(_running) = gate.enter() else {
+        return Ok(update::UpdateOutcome::Busy);
+    };
+    // Runs programs and waits for them: off the async threads.
+    tauri::async_runtime::spawn_blocking(|| {
+        let bundled = std::env::current_exe().is_ok_and(|exe| update::is_app_bundle(&exe));
+        let plan = update::plan(bundled, &|path| path.is_file(), &update::SystemRunner);
+        update::run_update(&plan, &update::SystemRunner)
+    })
+    .await
+    .map_err(|e| format!("the update could not be run: {e}"))
+}
+
+/// Starts the app again (after an update the new version starts).
+#[tauri::command]
+fn restart_app(app: AppHandle) {
+    app.restart()
+}
+
+/// Opens the release page in the default browser. The address is fixed here; the webview
+/// cannot choose it.
+#[tauri::command]
+fn open_release_page() -> Result<(), String> {
+    let opener = if cfg!(target_os = "macos") { "open" } else { "xdg-open" };
+    std::process::Command::new(opener)
+        .arg(update::RELEASES_PAGE_URL)
+        .spawn()
+        .map(drop)
+        .map_err(|e| format!("could not open the browser: {}", e.kind()))
+}
+
 pub fn run() {
     tauri::Builder::default()
         .manage(api::Gateway::default())
-        .invoke_handler(tauri::generate_handler![default_port, connect, restore, api_call])
+        .manage(update::UpdateGate::default())
+        .invoke_handler(tauri::generate_handler![
+            default_port,
+            connect,
+            restore,
+            api_call,
+            check_update,
+            run_update,
+            restart_app,
+            open_release_page
+        ])
         .run(tauri::generate_context!())
         .expect("error while running the binone client");
 }

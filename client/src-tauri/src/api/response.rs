@@ -220,7 +220,7 @@ mod tests {
             json!({"errors": [{"message": "m", "extensions": {"code": "CONFLICT", "reason": "unsupported_by_openspec_mcp", "missing": ["x"]}}]}),
         );
         assert_eq!((error.reason, error.missing.len()), (None, 0));
-        assert_eq!(serde_json::to_value(&ApiError::new(ApiErrorKind::Conflict, "d")).unwrap(), json!({"kind": "conflict", "detail": "d"}));
+        assert_eq!(serde_json::to_value(ApiError::new(ApiErrorKind::Conflict, "d")).unwrap(), json!({"kind": "conflict", "detail": "d"}));
     }
 
     #[test]

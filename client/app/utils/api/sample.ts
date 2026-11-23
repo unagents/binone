@@ -16,6 +16,7 @@ import type {
   SubmitCheck,
 } from "~/types/binone";
 import type { NativeCall } from "~/utils/api/transport";
+import { MANUAL_COMMAND, type UpdateCheck, type UpdateOutcome } from "~/utils/update";
 
 const MINUTE = 60_000;
 
@@ -38,6 +39,18 @@ export interface SampleOptions {
   /** Every operation but `serverInfo` fails with this kind (to see the failure screens). */
   failWith?: ApiErrorKind;
   now?: number;
+  /** What the version check finds (`?sample-update=latest|available|unknown`). */
+  update?: SampleUpdate;
+}
+
+export type SampleUpdate = "latest" | "available" | "unknown";
+export const SAMPLE_UPDATES: readonly SampleUpdate[] = ["latest", "available", "unknown"];
+
+function sampleCheck(kind: SampleUpdate): UpdateCheck {
+  const current = "0.2.0";
+  if (kind === "available") return { state: "available", current, latest: "0.3.0" };
+  if (kind === "unknown") return { state: "unknown", current, reason: "GitHub refused the request (rate limit?): HTTP 403" };
+  return { state: "up_to_date", current, latest: current };
 }
 
 export function createSampleServer(options: SampleOptions = {}): NativeCall {
@@ -184,6 +197,14 @@ export function createSampleServer(options: SampleOptions = {}): NativeCall {
         return { state: "connected", host: "127.0.0.1", port: null, version: "sample" };
       case "connect":
         return { host: String(args?.host ?? "127.0.0.1"), port: (args?.port as number | null) ?? null, version: "sample" };
+      case "check_update":
+        return sampleCheck(options.update ?? "latest");
+      case "run_update":
+        // Without Homebrew in the sample, the screen shows the manual way.
+        return { state: "manual", reason: "no_brew", command: MANUAL_COMMAND, url: "https://github.com/unagents/binone/releases/latest" } satisfies UpdateOutcome;
+      case "restart_app":
+      case "open_release_page":
+        return null;
       case "api_call": {
         const op = String(args?.op);
         if (!(OPERATION_NAMES as readonly string[]).includes(op)) fail("invalid_input", "unknown operation");

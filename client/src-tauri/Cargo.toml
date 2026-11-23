@@ -16,5 +16,5 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = [] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-# The server is reached over plain HTTP on the user's network, so no TLS backend is built in.
-reqwest = { version = "0.13", default-features = false, features = ["json"] }
+# The server is reached over plain HTTP on the user's network; TLS (the system's, via native-tls) is only for the release check against GitHub.
+reqwest = { version = "0.13", default-features = false, features = ["json", "native-tls"] }

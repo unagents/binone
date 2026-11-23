@@ -1,13 +1,19 @@
 <script setup lang="ts">
+import { badgeText } from "~/utils/update";
 // Every screen but the connection screen needs a working connection: until there is one, the
 // connection screen is shown in place of the page (so a start with no saved address, or a failed
 // one, lands on it, and so does a page opened later when the connection was changed).
 const route = useRoute();
 const { connected, address, restore } = useConnection();
+const { check, checkAtStartup } = useUpdate();
 
 onMounted(() => {
   void restore();
+  // One check for a newer version after startup; it does not wait for, or disturb, the connection.
+  checkAtStartup();
 });
+
+const updateBadge = computed(() => badgeText(check.value));
 
 const nav = [
   { label: "依頼の一覧", to: "/requests", match: "/requests" },
@@ -42,6 +48,16 @@ const showPage = computed(() => connected.value !== null || route.path === "/con
           </NuxtLink>
         </nav>
       </div>
+      <div class="flex min-w-0 shrink items-center gap-3">
+      <NuxtLink
+        v-if="updateBadge"
+        :to="{ path: '/settings', hash: '#version' }"
+        class="shrink-0 rounded-md border border-primary/40 bg-primary/10 px-2 py-1 text-xs text-primary transition-colors hover:bg-primary/20"
+        data-testid="update-badge"
+        title="設定の画面の版の欄を開く"
+      >
+        {{ updateBadge }}
+      </NuxtLink>
       <NuxtLink
         to="/connect"
         class="flex min-w-0 shrink items-center gap-2 rounded-md border border-default px-3 py-1.5 text-xs text-muted transition-colors hover:bg-elevated hover:text-default"
@@ -55,6 +71,7 @@ const showPage = computed(() => connected.value !== null || route.path === "/con
         </template>
         <span v-else class="shrink-0">未接続</span>
       </NuxtLink>
+      </div>
     </header>
 
     <div class="min-h-0 flex-1 overflow-auto">

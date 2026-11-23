@@ -2,7 +2,8 @@
 
 The client app (`client/`) is distributed as a Homebrew cask for Apple Silicon Macs
 (macOS 15 Sequoia or later). The app is ad-hoc signed; the cask removes the quarantine
-attribute when it installs the app. The app has no in-app updater: updates come through brew.
+attribute when it installs the app. The app has no auto-updater (no Tauri updater plugin, no update signing key): it checks for a newer
+version and runs the brew update when asked (see "Checking and updating from the app").
 
 ## Install (on the user's Mac)
 
@@ -24,6 +25,30 @@ brew upgrade --cask unagents/tap/binone
 
 `brew tap <user>/<name>` without a URL looks for `<user>/homebrew-<name>` on GitHub. For a tap
 hosted elsewhere, pass its git URL as a second argument: `brew tap <user>/<name> <git URL>`.
+
+## Checking and updating from the app
+
+The native side asks GitHub's public API (no credentials) for the latest release of the
+client's repository, once after startup and when "確認" on the settings screen is pressed; there
+is no periodic check. The tag, without its leading `v`, is compared with the running version as
+three numbers (`0.10.0` is newer than `0.9.0`). Drafts, prereleases and tags that are not a plain
+`X.Y.Z` are not candidates. A failure (no network, rate limit, an answer of another shape)
+shows as "確認できません" with the reason on the settings screen and does not affect the
+connection or the other screens. When a newer version exists, every screen's header shows
+"新しい版 X.Y.Z", which opens the version card of the settings screen.
+
+"更新" appears only when a newer version exists. It looks for Homebrew at
+`/opt/homebrew/bin/brew`, then `/usr/local/bin/brew` (not through `PATH`), checks that this app
+is an app bundle installed by the cask (`brew list --cask binone` succeeds), and then runs
+`brew update` and `brew upgrade --cask binone` as program-and-arguments, not through a shell. The
+screen shows it running, then the exit code and the end of the output on failure; a button
+starts the app again after a success (it never restarts by itself). Without Homebrew, or for an
+app that the cask did not install (a development build), nothing is run: the screen offers the
+release page in the default browser and the command `brew upgrade --cask binone`. The update
+does not touch the app's data directory, so the saved address and key stay.
+
+With `NUXT_PUBLIC_SAMPLE_DATA=1` the three states can be drawn with `?sample-update=latest`,
+`?sample-update=available` and `?sample-update=unknown`.
 
 ## Release
 
