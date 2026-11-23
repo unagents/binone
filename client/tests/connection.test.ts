@@ -4,6 +4,7 @@ import {
   isConnectError,
   isValidIpv4,
   parsePort,
+  submitsOnKeydown,
   type ConnectErrorKind,
 } from "../app/utils/connection";
 
@@ -47,5 +48,43 @@ describe("connect errors", () => {
     const titles = kinds.map((kind) => describeConnectError(kind, "10.0.0.1:47610").title);
     expect(new Set(titles).size).toBe(kinds.length);
     expect(titles[1]).toContain("10.0.0.1:47610");
+  });
+  it("points to the local network permission of macOS only when the server was not reached", () => {
+    const kinds: ConnectErrorKind[] = ["invalid_input", "unreachable", "forbidden", "unauthorized", "bad_response", "storage", "internal"];
+    for (const kind of kinds) {
+      const { description, hint } = describeConnectError(kind, "10.0.0.1:47610");
+      if (kind === "unreachable") {
+        // After the existing advice, which stays as it was.
+        expect(description).toBe("IP と port が合っているか、サーバーが起動しているか、同じネットワークにいるかを確かめてください。");
+        expect(hint).toContain("ローカルネットワーク上のデバイスの検索と接続");
+        expect(hint).toContain("もう一度「接続」を押してください");
+        expect(hint).toContain("システム設定 › プライバシーとセキュリティ › ローカルネットワーク");
+      } else {
+        expect(hint).toBeUndefined();
+        expect(description).not.toContain("ローカルネットワーク");
+      }
+    }
+  });
+});
+
+describe("submitsOnKeydown", () => {
+  const enter = { key: "Enter", isComposing: false, keyCode: 13 };
+
+  it("starts the connection on Return", () => {
+    expect(submitsOnKeydown(enter, false)).toBe(true);
+  });
+  it("does not start a second connection while one is being made", () => {
+    expect(submitsOnKeydown(enter, true)).toBe(false);
+  });
+  it("leaves the Return that confirms a conversion to the input method", () => {
+    expect(submitsOnKeydown({ ...enter, isComposing: true }, false)).toBe(false);
+    // WebKit: the composition has already ended when this keydown arrives.
+    expect(submitsOnKeydown({ ...enter, keyCode: 229 }, false)).toBe(false);
+    expect(submitsOnKeydown({ key: "Process", isComposing: true, keyCode: 229 }, false)).toBe(false);
+  });
+  it("ignores other keys", () => {
+    for (const key of ["a", "Tab", "Escape", " "]) {
+      expect(submitsOnKeydown({ key, isComposing: false, keyCode: 0 }, false)).toBe(false);
+    }
   });
 });

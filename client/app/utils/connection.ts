@@ -39,13 +39,37 @@ export function isConnectError(value: unknown): value is ConnectError {
   return typeof kind === "string" && typeof detail === "string";
 }
 
-/** What the user reads for each kind of failure: what happened and what to check. */
-export function describeConnectError(kind: ConnectErrorKind, address: string): { title: string; description: string } {
+/**
+ * Whether a keydown in a field of the connection form starts the connection: the Return key,
+ * but not while a connection is being made, and not the Return that confirms an input method's
+ * conversion. WebKit reports that Return after the composition has ended, so `isComposing` is
+ * already false there; the key code 229 is what still marks it.
+ */
+export function submitsOnKeydown(
+  event: { key: string; isComposing: boolean; keyCode: number },
+  connecting: boolean,
+): boolean {
+  if (event.key !== "Enter") return false;
+  if (event.isComposing || event.keyCode === 229) return false;
+  return !connecting;
+}
+
+/**
+ * What the user reads for each kind of failure: what happened and what to check. `hint` is a
+ * further thing to check, shown after the description.
+ */
+export function describeConnectError(
+  kind: ConnectErrorKind,
+  address: string,
+): { title: string; description: string; hint?: string } {
   switch (kind) {
     case "unreachable":
       return {
         title: `サーバーに届きませんでした（${address}）`,
         description: "IP と port が合っているか、サーバーが起動しているか、同じネットワークにいるかを確かめてください。",
+        // The first connection to an address on the local network fails while macOS is still
+        // asking for the permission, and keeps failing when it was denied.
+        hint: "macOS が「ローカルネットワーク上のデバイスの検索と接続」の許可を求めていたら、許可してからもう一度「接続」を押してください。許可しなかった時は「システム設定 › プライバシーとセキュリティ › ローカルネットワーク」で binone をオンにしてください。",
       };
     case "forbidden":
       return {

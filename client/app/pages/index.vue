@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { describeConnectError, isValidIpv4, parsePort } from "~/utils/connection";
+import { describeConnectError, isValidIpv4, parsePort, submitsOnKeydown } from "~/utils/connection";
 
 const { connected, failure, defaultPort, restore, connect, change } = useConnection();
 
@@ -35,6 +35,8 @@ const failureMessage = computed(() => {
 });
 
 async function onSubmit() {
+  // One attempt at a time, however it was started (the button, or Return in a field).
+  if (connecting.value) return;
   hostError.value = undefined;
   portError.value = undefined;
 
@@ -52,6 +54,16 @@ async function onSubmit() {
   connecting.value = true;
   await connect(ip, parsed.port);
   connecting.value = false;
+}
+
+/**
+ * Return in the IP or the port field does what the button does. The key's own action is always
+ * suppressed, so the form is not submitted a second time by the webview.
+ */
+function onFieldKeydown(event: KeyboardEvent) {
+  if (event.key !== "Enter") return;
+  event.preventDefault();
+  if (submitsOnKeydown(event, connecting.value)) void onSubmit();
 }
 
 function onChange() {
@@ -104,6 +116,7 @@ function onChange() {
         >
           <template #description>
             <p>{{ failureMessage.description }}</p>
+            <p v-if="failureMessage.hint" class="mt-1" data-testid="connection-error-hint">{{ failureMessage.hint }}</p>
             <p class="mt-1 font-mono text-xs opacity-80">{{ failureMessage.detail }}</p>
           </template>
         </UAlert>
@@ -117,6 +130,7 @@ function onChange() {
             autocapitalize="off"
             spellcheck="false"
             autofocus
+            @keydown="onFieldKeydown"
           />
         </UFormField>
 
@@ -146,6 +160,7 @@ function onChange() {
                 inputmode="numeric"
                 :placeholder="defaultPort === null ? '' : String(defaultPort)"
                 autocomplete="off"
+                @keydown="onFieldKeydown"
               />
             </UFormField>
           </template>

@@ -3,6 +3,6 @@
 <plist version="1.0">
 <dict>
   <key>NSLocalNetworkUsageDescription</key>
-  <string>binone connects to the binone server on your network.</string>
+  <string>binone は、同じネットワーク上の binone サーバーに接続します。</string>
 </dict>
 </plist>
