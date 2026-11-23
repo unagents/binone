@@ -1,0 +1,3 @@
+<template>
+  <ConnectionScreen />
+</template>

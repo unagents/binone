@@ -13,6 +13,11 @@ export default defineNuxtConfig({
   // The client talks only to the binone server, so nothing is fetched from the internet at
   // runtime: web fonts are off and the icons in use are bundled into the client.
   ui: { fonts: false },
+  // Dark, like the prototypes; the colour palette is in app/app.config.ts and assets/css.
+  colorMode: { preference: "dark", fallback: "dark" },
+  // Off in every real build. NUXT_PUBLIC_SAMPLE_DATA=1 at build time swaps the native side for
+  // sample data (app/utils/api/sample.ts) so the screens can be drawn without Tauri.
+  runtimeConfig: { public: { sampleData: false } },
   icon: {
     provider: "none",
     clientBundle: { scan: true, icons: ["lucide:loader-circle", "lucide:chevron-down"] },

@@ -1,0 +1,174 @@
+// A stand-in for the native side with sample data, for drawing the screens where Tauri's
+// `invoke` does not exist (a headless browser). It is switched on only by building with
+// `NUXT_PUBLIC_SAMPLE_DATA=1` (see plugins/sample.client.ts); a normal build never loads it.
+// It follows the same contract as the native side: operation name + arguments in, a value or an
+// `ApiError` out, and it refuses a name that is not in the allowlist.
+import { OPERATION_NAMES, type OperationName } from "~/utils/api/operations";
+import type { ApiError, ApiErrorKind } from "~/utils/api/errors";
+import type {
+  LaneDef,
+  Notification,
+  Request,
+  RequestDetail,
+  RequestFilter,
+  RequestSummary,
+  SettingsView,
+} from "~/types/binone";
+import type { NativeCall } from "~/utils/api/transport";
+
+const MINUTE = 60_000;
+
+function fail(kind: ApiErrorKind, detail: string): never {
+  throw { kind, detail } satisfies ApiError;
+}
+
+function lanes(): LaneDef[] {
+  return [
+    { name: "draft", label: "下書き" },
+    { name: "todo", label: "todo" },
+    { name: "prepare", label: "準備" },
+    { name: "doing", label: "作業中" },
+    { name: "done", label: "完了" },
+    { name: "archive", label: "保管" },
+  ];
+}
+
+export interface SampleOptions {
+  /** Every operation but `serverInfo` fails with this kind (to see the failure screens). */
+  failWith?: ApiErrorKind;
+  now?: number;
+}
+
+export function createSampleServer(options: SampleOptions = {}): NativeCall {
+  const now = options.now ?? Date.now();
+  let nextId = 100;
+  const projects = ["binone", "bantou", "memory"];
+  const requests: Request[] = [
+    sample("req_1", "依頼の一覧の見た目を整える", "binone", "feature", ["ui"], "doing", now - 5 * MINUTE),
+    sample("req_2", "通知の帯の表示時間を決める", "binone", "task", [], "todo", now - 60 * MINUTE),
+    sample("req_3", "memory の検索を速くする", "memory", "feature", ["perf", "search"], "prepare", now - 3 * 60 * MINUTE),
+    sample("req_4", "設定の画面の文言", "binone", "task", ["ui"], "draft", now - 26 * 60 * MINUTE),
+    sample("req_5", "bantou の接続を見直す", "bantou", "feature", [], "done", now - 3 * 24 * 60 * MINUTE),
+  ];
+  const settings: SettingsView = {
+    settings: { lanes: lanes(), kinds: ["feature", "task", "bug"], scheduler_interval_secs: 30, bantou_endpoint: null, memory_endpoint: null },
+    allowed_ranges: ["192.168.0.0/24"],
+    allowed_origins: ["tauri://localhost"],
+    listen_port: 47610,
+  };
+  const notifications: Notification[] = [
+    { id: 1, source_session: "worker-1", summary: "どの案で進めますか", request_id: "req_1", question_id: "q_1", at_ms: now - 2 * MINUTE },
+    { id: 2, source_session: null, summary: "定期処理が終わりました", request_id: null, question_id: null, at_ms: now - 40 * MINUTE },
+  ];
+
+  function summary(r: Request): RequestSummary {
+    return { id: r.id, title: r.title, project: r.project, kind: r.kind, tags: r.tags, lane: r.lane, currentStep: r.lane === "doing" ? "実装" : null, updatedMs: r.updatedMs };
+  }
+
+  function find(id: string): Request {
+    return requests.find((r) => r.id === id) ?? fail("not_found", `request ${id}`);
+  }
+
+  function filtered(filter: RequestFilter | null | undefined): RequestSummary[] {
+    const f = filter ?? {};
+    let rows = requests.filter(
+      (r) =>
+        (!f.project || r.project === f.project) &&
+        (!f.kinds?.length || f.kinds.includes(r.kind)) &&
+        (!f.tags?.length || r.tags.some((t) => f.tags?.includes(t))),
+    );
+    const order = f.orderBy ?? "UPDATED_DESC";
+    rows = [...rows].sort((a, b) =>
+      order === "UPDATED_ASC" ? a.updatedMs - b.updatedMs : order === "PROJECT_ASC" ? a.project.localeCompare(b.project) : order === "PROJECT_DESC" ? b.project.localeCompare(a.project) : b.updatedMs - a.updatedMs,
+    );
+    return rows.map(summary);
+  }
+
+  function detail(r: Request): RequestDetail {
+    return {
+      request: { id: r.id, title: r.title, project: r.project, kind: r.kind, tags: r.tags, protocol: r.protocol, change_ref: r.change, lane: r.lane, body: r.body, version: r.version, created_ms: r.createdMs, updated_ms: r.updatedMs },
+      lane: r.lane,
+      steps: [],
+      waits: [],
+      intakes: [],
+      allowed_operations: r.lane === "draft" ? ["save_draft", "submit_request"] : [],
+      history: [{ source: "binone", at_ms: r.createdMs, summary: "登録" }],
+      missing_sources: [],
+      external_notes: [],
+    };
+  }
+
+  const operations: Record<OperationName, (args: Record<string, unknown>) => unknown> = {
+    serverInfo: () => ({ version: "sample" }),
+    requests: (a) => filtered(a.filter as RequestFilter | null | undefined),
+    request: (a) => find(String(a.id)),
+    requestDetail: (a) => detail(find(String(a.id))),
+    artifact: () => fail("not_found", "no artifact in the sample data"),
+    conversation: () => null,
+    notifications: (a) => notifications.slice(0, typeof a.limit === "number" ? a.limit : undefined),
+    projects: () => [...projects],
+    settings: () => structuredClone(settings),
+    agentMcpConfig: () => ({ path: "/mcp", transport: "http", port: 47610, auth: "bearer" }),
+    saveDraft: (a) => {
+      const id = typeof a.id === "string" ? a.id : null;
+      if (id === null) {
+        const created = sample(`req_${nextId++}`, String(a.title ?? ""), String(a.project ?? ""), String(a.kind ?? ""), (a.tags as string[] | undefined) ?? [], "draft", Date.now());
+        created.body = String(a.body ?? "");
+        requests.push(created);
+        return created;
+      }
+      const current = find(id);
+      if (current.version !== a.version) fail("conflict", "version moved on");
+      Object.assign(current, { title: String(a.title ?? ""), body: String(a.body ?? ""), project: String(a.project ?? ""), kind: String(a.kind ?? ""), tags: (a.tags as string[] | undefined) ?? [], version: current.version + 1, updatedMs: Date.now() });
+      return current;
+    },
+    submitRequest: (a) => {
+      const current = find(String(a.id));
+      if (current.version !== a.version) fail("conflict", "version moved on");
+      if (current.lane !== "draft") fail("conflict", "not a draft");
+      Object.assign(current, { lane: "todo", version: current.version + 1, updatedMs: Date.now() });
+      return current;
+    },
+    decideApproval: () => [],
+    answerQuestion: () => true,
+    createProject: (a) => {
+      const name = String(a.name ?? "").trim();
+      if (name === "") fail("invalid_input", "empty name");
+      if (!projects.includes(name)) projects.push(name);
+      return name;
+    },
+    updateSettings: (a) => {
+      const next = a.settings as SettingsView["settings"];
+      if (next.lanes[0]?.name !== "draft") fail("invalid_input", "the first lane must be `draft`");
+      settings.settings = structuredClone(next);
+      return structuredClone(settings);
+    },
+    registerConversation: () => true,
+  };
+
+  return async (command, args) => {
+    switch (command) {
+      case "default_port":
+        return 47610;
+      case "restore":
+        return { state: "connected", host: "127.0.0.1", port: null, version: "sample" };
+      case "connect":
+        return { host: String(args?.host ?? "127.0.0.1"), port: (args?.port as number | null) ?? null, version: "sample" };
+      case "api_call": {
+        const op = String(args?.op);
+        if (!(OPERATION_NAMES as readonly string[]).includes(op)) fail("invalid_input", "unknown operation");
+        if (options.failWith && op !== "serverInfo") fail(options.failWith, "sample failure");
+        const raw = args?.args;
+        const handler = operations[op as OperationName];
+        // A copy, as the real answer is: what the screen holds must not change behind its back.
+        return structuredClone(handler((typeof raw === "object" && raw !== null ? raw : {}) as Record<string, unknown>));
+      }
+      default:
+        return fail("internal", `unknown command ${command}`);
+    }
+  };
+}
+
+function sample(id: string, title: string, project: string, kind: string, tags: string[], lane: string, updatedMs: number): Request {
+  return { id, version: 1, title, body: "", project, kind, tags, protocol: null, change: null, lane, createdMs: updatedMs - 60_000, updatedMs };
+}

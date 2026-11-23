@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { callNative } from "~/utils/api/transport";
 import { isConnectError, type ConnectError } from "~/utils/connection";
 
 /** A working connection. `port: null` means the default port is in use. */
@@ -26,20 +26,25 @@ function toConnectError(error: unknown): ConnectError {
   return { kind: "internal", detail: String(error) };
 }
 
+// The connection is one thing for the whole app: the header, the gate and the connection screen
+// all read this state.
+let restoration: Promise<void> | null = null;
+
 /**
  * The connection to the binone server. All of it happens on the native side through the
  * `default_port`, `connect` and `restore` commands; the key never reaches this code.
  */
 export function useConnection() {
-  const connected = ref<Connected | null>(null);
-  const failure = ref<Failure | null>(null);
-  const defaultPort = ref<number | null>(null);
+  const connected = useState<Connected | null>("binone-connected", () => null);
+  const failure = useState<Failure | null>("binone-failure", () => null);
+  const defaultPort = useState<number | null>("binone-default-port", () => null);
+  /** True until the saved address and key were tried once at startup. */
+  const restoring = useState<boolean>("binone-restoring", () => true);
 
-  /** Startup: try the saved address and key. */
-  async function restore() {
+  async function restoreOnce() {
     try {
-      defaultPort.value = await invoke<number>("default_port");
-      const restored = await invoke<Restored>("restore");
+      defaultPort.value = await callNative<number>("default_port");
+      const restored = await callNative<Restored>("restore");
       if (restored.state === "connected") {
         connected.value = { host: restored.host, port: restored.port, version: restored.version };
       } else if (restored.state === "failed") {
@@ -48,6 +53,13 @@ export function useConnection() {
     } catch (error) {
       failure.value = { host: "", port: null, error: toConnectError(error) };
     }
+    restoring.value = false;
+  }
+
+  /** Startup: try the saved address and key. Runs once, however many screens ask. */
+  function restore(): Promise<void> {
+    restoration ??= restoreOnce();
+    return restoration;
   }
 
   /**
@@ -58,7 +70,7 @@ export function useConnection() {
   async function connect(host: string, port: number | null) {
     failure.value = null;
     try {
-      connected.value = await invoke<Connected>("connect", { host, port });
+      connected.value = await callNative<Connected>("connect", { host, port });
     } catch (error) {
       failure.value = { host, port, error: toConnectError(error) };
     }
@@ -73,5 +85,11 @@ export function useConnection() {
     failure.value = null;
   }
 
-  return { connected, failure, defaultPort, restore, connect, change };
+  /** `host` or `host:port`, with the default port shown when none was given. */
+  function address(host: string, port: number | null) {
+    const shownPort = port ?? defaultPort.value;
+    return shownPort === null ? host : `${host}:${shownPort}`;
+  }
+
+  return { connected, failure, defaultPort, restoring, restore, connect, change, address };
 }
