@@ -457,12 +457,18 @@ mod tests {
 
     #[test]
     fn a_run_past_the_limit_is_stopped() {
+        // The limit is counted from before the fake is even spawned, so it must leave the fake
+        // (a shell) ample time to start and print "partial" while the tests run in parallel on a
+        // loaded machine; the fake then holds on until it is stopped, never ending on its own.
+        // Only the stop can end the run under 30 s, so the elapsed time shows that the kill worked.
+        let limit = Duration::from_secs(5);
         let started = std::time::Instant::now();
-        let out = ask_with("cat >/dev/null; echo partial; sleep 30", None, Duration::from_millis(500));
+        let out = ask_with("echo partial; sleep 30", None, limit);
         let Outcome::Notice { kind, detail, .. } = out else { panic!("expected a notice") };
         assert_eq!(kind, NoticeKind::TimedOut);
         assert_eq!(detail.as_deref(), Some("partial"));
-        assert!(started.elapsed() < Duration::from_secs(10), "took {:?}", started.elapsed());
+        assert!(started.elapsed() >= limit, "ended before the limit: {:?}", started.elapsed());
+        assert!(started.elapsed() < Duration::from_secs(25), "took {:?}", started.elapsed());
     }
 
     #[test]
