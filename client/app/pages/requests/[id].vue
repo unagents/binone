@@ -12,6 +12,7 @@ import {
   stepStatusText,
 } from "~/utils/requests";
 import { requestRoute } from "~/utils/routes";
+import { SCREEN_UNSUPPORTED } from "~/utils/unsupported";
 
 const route = useRoute();
 const api = useApi();
@@ -117,7 +118,8 @@ const editable = computed(() => (detail.value ? canEditDraft(detail.value) : fal
 
           <UnsupportedNotice
             what="承認・修正の指示・質問への回答"
-            missing="この画面からの操作（承認と修正の指示は decideApproval、質問への回答は answerQuestion。画面は未実装）"
+            :headline="SCREEN_UNSUPPORTED"
+            missing="この画面からの操作（画面が未実装です。サーバーの操作はあります: 承認と修正の指示は decideApproval、質問への回答は answerQuestion）"
           />
 
           <section class="rounded-lg border border-default p-4" data-testid="artifacts">

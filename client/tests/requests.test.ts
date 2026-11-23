@@ -2,7 +2,9 @@ import { describe, expect, it } from "vitest";
 import {
   addTag,
   currentStep,
+  describeBodyUnreadable,
   describeMissingSource,
+  missingReasonText,
   emptyForm,
   formFromRequest,
   laneText,
@@ -113,6 +115,37 @@ describe("describeMissingSource", () => {
     expect(d.name).toBe("openspec");
     expect(d.reason).toContain("未接続");
     expect(describeMissingSource({ service: "bantou", kind: "invalid_input", detail: "x" }).reason).toContain("未対応");
+  });
+});
+
+describe("a missing source with a reason", () => {
+  const reasons = ["change_not_set", "show_unsupported", "not_found", "unavailable"];
+
+  it("says the same sentence in the list as in the body's place", () => {
+    for (const reason of reasons) {
+      const source = { item: "body", service: "open_spec", kind: "external_unavailable", detail: "x", reason } as const;
+      const listed = describeMissingSource(source);
+      expect(listed.reason).toBe(describeBodyUnreadable([source]));
+      expect(listed.reason).toBe(missingReasonText(reason));
+      expect(listed.reason).not.toContain("未接続");
+      expect(listed.name).toBe("openspec");
+      expect(listed.detail).toBe("x");
+    }
+    expect(missingReasonText("show_unsupported")).toContain("未対応");
+  });
+
+  it("keeps the kind's wording without a reason, or with one not known here", () => {
+    expect(missingReasonText(undefined)).toBeUndefined();
+    expect(missingReasonText(null)).toBeUndefined();
+    expect(missingReasonText("")).toBeUndefined();
+    expect(missingReasonText("something_new")).toBeUndefined();
+    const base = { item: "body", service: "open_spec", kind: "external_unavailable", detail: "x" } as const;
+    expect(describeMissingSource(base).reason).toBe("未接続（届きません）");
+    expect(describeMissingSource({ ...base, reason: null }).reason).toBe("未接続（届きません）");
+    expect(describeMissingSource({ ...base, reason: "something_new" }).reason).toBe("未接続（届きません）");
+    expect(describeMissingSource({ ...base, kind: "not_found" }).reason).toBe("未対応（サーバーがこの情報を返せません）");
+    expect(describeMissingSource({ ...base, kind: "external_outcome_unknown" }).reason).toBe("結果が分かりません");
+    expect(describeMissingSource({ ...base, kind: "internal" }).reason).toBe("読み出しに失敗しました");
   });
 });
 

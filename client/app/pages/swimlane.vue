@@ -8,8 +8,12 @@ import {
   filterChoices,
   isFiltering,
   isLanePinned,
+  laneLabelOf,
   normalizeHidden,
   parseView,
+  projectFromSelect,
+  projectSelect,
+  projectToSelect,
   type SwimlaneFilter,
   type SwimlaneGroupBy,
   type SwimlaneOrder,
@@ -50,7 +54,8 @@ const lanes = computed(() => data.value?.lanes ?? []);
 const items = computed(() => data.value?.items ?? []);
 const board = computed(() => buildBoard(items.value, lanes.value, { filter, hidden: view.hidden, order: view.order, groupBy: view.groupBy }));
 const hidden = computed(() => normalizeHidden(lanes.value, view.hidden));
-const projectChoices = computed(() => ["", ...filterChoices(items.value, "project")].map((v) => ({ label: v === "" ? "すべて" : v, value: v })));
+// "All" is a choice of the same select, under a value that is neither empty nor a project's name.
+const projectChoices = computed(() => projectSelect(filterChoices(items.value, "project")));
 const kindChoices = computed(() => filterChoices(items.value, "kind"));
 const tagChoices = computed(() => filterChoices(items.value, "tags"));
 const screenDrafts = computed(() => board.value.columns.filter((c) => c.lane === "draft").flatMap((c) => c.groups.flatMap((g) => g.items.map((i) => i.id))));
@@ -160,7 +165,7 @@ function batchSettled() {
     <div class="flex flex-wrap items-center gap-x-4 gap-y-3" data-testid="swimlane-toolbar">
       <label class="flex items-center gap-2 text-sm text-muted">
         プロジェクト
-        <USelect :model-value="filter.project ?? ''" :items="projectChoices" size="sm" class="w-40" data-testid="filter-project" @update:model-value="(v: string) => (filter.project = v === '' ? null : v)" />
+        <USelect :model-value="projectToSelect(filter.project, projectChoices.all)" :items="projectChoices.items" size="sm" class="w-40" data-testid="filter-project" @update:model-value="(v: string) => (filter.project = projectFromSelect(v, projectChoices.all))" />
       </label>
       <UPopover>
         <UButton color="neutral" variant="outline" size="sm" data-testid="filter-kinds-button">種別<span v-if="filter.kinds.length" class="ml-1 rounded-full bg-primary px-1.5 text-[10px] text-inverted">{{ filter.kinds.length }}</span></UButton>
@@ -240,7 +245,7 @@ function batchSettled() {
               <p class="mt-2 flex items-center gap-1 truncate text-xs text-muted"><UIcon name="i-lucide-folder" class="size-3" />{{ item.project || "（プロジェクト未設定）" }}<span v-if="item.kind"> ・ {{ item.kind }}</span></p>
               <p v-if="item.currentStep" class="mt-1 flex items-center gap-1 truncate text-xs text-muted"><UIcon name="i-lucide-footprints" class="size-3" />{{ item.currentStep }}</p>
               <div v-if="item.tags.length" class="mt-2 flex flex-wrap gap-1"><span v-for="tag in item.tags" :key="tag" class="max-w-36 truncate rounded-full border border-primary/25 bg-primary/10 px-2 text-xs text-primary">{{ tag }}</span></div>
-              <p class="mt-2 flex items-center gap-1 text-xs text-muted"><UIcon name="i-lucide-clock" class="size-3" />{{ formatTime(item.updatedMs) }}<span v-if="item.lane !== column.lane" class="ml-auto truncate">（{{ item.lane }}）</span></p>
+              <p class="mt-2 flex items-center gap-1 text-xs text-muted"><UIcon name="i-lucide-clock" class="size-3" />{{ formatTime(item.updatedMs) }}<span v-if="item.lane !== column.lane" class="ml-auto truncate">（{{ laneLabelOf(lanes, item.lane) }}）</span></p>
             </article>
           </div>
           <p v-if="column.count === 0" class="py-4 text-center text-xs text-muted">依頼はありません</p>

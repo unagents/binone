@@ -8,9 +8,15 @@ import {
   filterChoices,
   foldedLane,
   groupItems,
+  allProjectsValue,
+  isFiltering,
   isLanePinned,
+  laneLabelOf,
   normalizeHidden,
   parseView,
+  projectFromSelect,
+  projectSelect,
+  projectToSelect,
   sortItems,
   visibleLanes,
 } from "../app/utils/swimlane";
@@ -160,5 +166,79 @@ describe("cardRoute", () => {
   it("sends the others to the request status", () => {
     expect(cardRoute({ id: "req_2", lane: "todo" })).toBe("/requests/req_2");
     expect(cardRoute({ id: "req_3", lane: "doing" })).toBe("/requests/req_3");
+  });
+});
+
+describe("the project select", () => {
+  it("offers all first, under a value that is not empty", () => {
+    const select = projectSelect(["bantou", "binone"]);
+    expect(select.items.map((item) => item.label)).toEqual(["すべて", "bantou", "binone"]);
+    expect(select.items[0]?.value).toBe(select.all);
+    expect(select.items.every((item) => item.value !== "")).toBe(true);
+  });
+
+  it("never gives an item an empty value, even for a project without a name", () => {
+    const select = projectSelect(["", "binone"]);
+    expect(select.items.map((item) => item.value)).toEqual([select.all, "binone"]);
+  });
+
+  it("keeps the all value apart from the projects' names", () => {
+    expect(allProjectsValue(["binone"])).toBe("__all__");
+    const taken = ["__all__", "__all___", "binone"];
+    const select = projectSelect(taken);
+    expect(taken).not.toContain(select.all);
+    expect(select.all).not.toBe("");
+    expect(new Set(select.items.map((item) => item.value)).size).toBe(select.items.length);
+    // The project that has the usual value is still a project: choosing it filters by it.
+    expect(projectFromSelect("__all__", select.all)).toBe("__all__");
+    expect(projectFromSelect(select.all, select.all)).toBeNull();
+  });
+
+  it("turns the all value into no project, and back", () => {
+    const { all } = projectSelect(["binone"]);
+    expect(projectFromSelect("binone", all)).toBe("binone");
+    expect(projectFromSelect(all, all)).toBeNull();
+    expect(projectFromSelect("", all)).toBeNull();
+    expect(projectFromSelect(undefined, all)).toBeNull();
+    expect(projectToSelect(null, all)).toBe(all);
+    expect(projectToSelect("", all)).toBe(all);
+    expect(projectToSelect("binone", all)).toBe("binone");
+  });
+
+  it("goes back to every card when all is chosen again", () => {
+    const { all } = projectSelect(filterChoices(items, "project"));
+    const chosen = { ...EMPTY_FILTER, project: projectFromSelect("binone", all) };
+    expect(applyFilter(items, chosen).map((i) => i.id)).toEqual(["a", "d"]);
+    const cleared = { ...EMPTY_FILTER, project: projectFromSelect(all, all) };
+    expect(isFiltering(cleared)).toBe(false);
+    expect(applyFilter(items, cleared)).toHaveLength(items.length);
+  });
+});
+
+describe("laneLabelOf", () => {
+  const labelled: LaneDef[] = [
+    { name: "draft", label: "下書き" },
+    { name: "doing", label: "作業中" },
+    { name: "done", label: "完了" },
+    { name: "archive", label: null },
+    { name: "empty", label: "" },
+  ];
+
+  it("gives the lane's label, not its internal name", () => {
+    expect(laneLabelOf(labelled, "done")).toBe("完了");
+  });
+
+  it("falls back to the name without a label, or for a lane that is not configured", () => {
+    expect(laneLabelOf(labelled, "archive")).toBe("archive");
+    expect(laneLabelOf(labelled, "empty")).toBe("empty");
+    expect(laneLabelOf(labelled, "gone")).toBe("gone");
+  });
+
+  it("names where a card folded into the lane before came from", () => {
+    const board = buildBoard([card("x", { lane: "done" })], labelled, { filter: EMPTY_FILTER, hidden: ["done"], order: "UPDATED_DESC", groupBy: "none" });
+    const column = board.columns.find((c) => c.lane === "doing");
+    const folded = column?.groups[0]?.items[0];
+    expect(folded?.lane).toBe("done");
+    expect(laneLabelOf(labelled, folded?.lane ?? "")).toBe("完了");
   });
 });

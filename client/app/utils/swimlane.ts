@@ -112,6 +112,16 @@ export function swimlaneLabel(lane: LaneDef): string {
   return lane.label && lane.label !== "" ? lane.label : lane.name;
 }
 
+/**
+ * The name shown for a lane given by its internal name: the configured label, or the name itself
+ * when the lane has no label or is not configured. A card folded into another lane says where it
+ * came from with this.
+ */
+export function laneLabelOf(lanes: readonly LaneDef[], name: LaneName): string {
+  const lane = lanes.find((candidate) => candidate.name === name);
+  return lane ? swimlaneLabel(lane) : name;
+}
+
 /** Groups already in the wanted order; groups are listed by name, the cards keep their order. */
 export function groupItems(items: readonly RequestSummary[], by: SwimlaneGroupBy): SwimlaneGroup[] {
   if (by === "none") return items.length === 0 ? [] : [{ key: "", label: "", items: [...items] }];
@@ -164,6 +174,42 @@ export function filterChoices(items: readonly RequestSummary[], key: "project" |
     else if (item[key] !== "") set.add(item[key]);
   }
   return [...set].sort((a, b) => a.localeCompare(b));
+}
+
+export const ALL_PROJECTS_LABEL = "すべて";
+
+/**
+ * The value of the "all projects" choice in the project select. A select item cannot have an empty
+ * value, so "no project chosen" needs a value of its own, and it must not be the name of a project:
+ * it is lengthened until no project has it.
+ */
+export function allProjectsValue(projects: readonly string[]): string {
+  let value = "__all__";
+  while (projects.includes(value)) value += "_";
+  return value;
+}
+
+export interface ProjectSelect {
+  /** The value that stands for "no project chosen". Never empty, never a project in `items`. */
+  all: string;
+  items: { label: string; value: string }[];
+}
+
+/** The project select: "all" first, then the projects (empty names are left out). */
+export function projectSelect(projects: readonly string[]): ProjectSelect {
+  const names = projects.filter((name) => name !== "");
+  const all = allProjectsValue(names);
+  return { all, items: [{ label: ALL_PROJECTS_LABEL, value: all }, ...names.map((name) => ({ label: name, value: name }))] };
+}
+
+/** What the select shows for the filter's project: the "all" value when none is chosen. */
+export function projectToSelect(project: string | null, all: string): string {
+  return project === null || project === "" ? all : project;
+}
+
+/** The filter's project for what the select gave: `null` (not chosen) for the "all" value. */
+export function projectFromSelect(value: string | null | undefined, all: string): string | null {
+  return value === null || value === undefined || value === "" || value === all ? null : value;
 }
 
 /** What to keep of the user's view between visits; anything unreadable gives the defaults. */

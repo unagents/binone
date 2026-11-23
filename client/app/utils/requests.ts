@@ -49,6 +49,11 @@ const BODY_REASON_TEXT: Record<string, string> = {
   unavailable: "openspec-mcp に届かないため、本文を読めません",
 };
 
+/** The sentence for a reason the server gives on a missing source; `undefined` for none or one not known here. */
+export function missingReasonText(reason: string | null | undefined): string | undefined {
+  return reason ? BODY_REASON_TEXT[reason] : undefined;
+}
+
 /**
  * The sentence for a body that cannot be read, by the reason the server gives on the `body` item of
  * `missing_sources`. No reason, or one not known here: "本文を取り出せません" with the server's `detail`
@@ -56,7 +61,7 @@ const BODY_REASON_TEXT: Record<string, string> = {
  */
 export function describeBodyUnreadable(sources: readonly MissingSource[] | null | undefined): string {
   const source = (sources ?? []).find((s) => s.item === "body");
-  const known = source?.reason ? BODY_REASON_TEXT[source.reason] : undefined;
+  const known = missingReasonText(source?.reason);
   if (known) return known;
   const detail = source?.detail?.trim();
   return detail ? `本文を取り出せません（${detail}）` : BODY_UNREADABLE_TEXT;
@@ -243,17 +248,20 @@ const SERVICE_NAMES: Record<string, string> = { bantou: "bantou", open_spec: "op
 
 /**
  * Sources the server could not read. They are shown by name and cause, never as an empty
- * history: "nothing happened" and "could not look" are different.
+ * history: "nothing happened" and "could not look" are different. When the server gives a reason
+ * known here, the cause is the same sentence the body's place shows (`describeBodyUnreadable`), so
+ * the two never disagree; without one, the cause is told from the kind of the failure.
  */
 export function describeMissingSource(source: MissingSource): { name: string; reason: string; detail: string } {
   const reason =
-    source.kind === "external_unavailable"
+    missingReasonText(source.reason) ??
+    (source.kind === "external_unavailable"
       ? "未接続（届きません）"
       : source.kind === "invalid_input" || source.kind === "not_found"
         ? "未対応（サーバーがこの情報を返せません）"
         : source.kind === "external_outcome_unknown"
           ? "結果が分かりません"
-          : "読み出しに失敗しました";
+          : "読み出しに失敗しました");
   return { name: SERVICE_NAMES[source.service] ?? source.service, reason, detail: source.detail };
 }
 
