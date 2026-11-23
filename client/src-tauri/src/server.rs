@@ -478,6 +478,22 @@ mod tests {
     }
 
     #[test]
+    fn a_request_that_cannot_be_built_is_internal() {
+        // A URL without a host cannot be made into a request: the error is reqwest's "builder"
+        // kind, the one a header or a URL that cannot be sent produces. Nothing listens anywhere
+        // here, and nothing is sent.
+        let error = run(reqwest::Client::new().post("http://").send()).unwrap_err();
+        assert!(error.is_builder(), "{error:?}");
+        assert_eq!(
+            send_error("POST /key", &error),
+            ConnectError::new(ErrorKind::Internal, "POST /key: the request could not be built")
+        );
+        // The screen tells the kinds apart by this name.
+        let text = serde_json::to_string(&send_error("POST /graphql", &error)).unwrap();
+        assert_eq!(text, r#"{"kind":"internal","detail":"POST /graphql: the request could not be built"}"#);
+    }
+
+    #[test]
     fn the_default_port_is_used_when_none_is_given() {
         let endpoint = Endpoint { host: Ipv4Addr::new(10, 0, 0, 1), port: None };
         assert_eq!(endpoint.url("/key"), format!("http://10.0.0.1:{DEFAULT_SERVER_PORT}/key"));

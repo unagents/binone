@@ -187,6 +187,25 @@ mod tests {
     }
 
     #[test]
+    fn a_new_key_that_cannot_be_saved_leaves_the_saved_connection_as_it_was() {
+        let dir = TestDir::new();
+        let (endpoint, _) = stub(good_server(KEY));
+        storage::save(&settings(&dir), &endpoint, "old-key").unwrap();
+        let before = std::fs::read(settings(&dir)).unwrap();
+
+        // The server replaces the rejected key, but the settings directory is read-only.
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o500)).unwrap();
+        let restored = run(restore_saved(&settings(&dir)));
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+
+        let Restored::Failed { error, .. } = &restored else { panic!("{restored:?}") };
+        assert_eq!(error.kind, ErrorKind::Storage);
+        assert!(!json(&restored).contains(KEY));
+        assert_eq!(std::fs::read(settings(&dir)).unwrap(), before);
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[test]
     fn what_the_webview_gets_never_holds_the_key() {
         let dir = TestDir::new();
         let (endpoint, _) = stub(good_server(KEY));

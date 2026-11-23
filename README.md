@@ -10,7 +10,7 @@ The user registers a request; binone carries it forward without further instruct
   shows the server's version. The HTTP calls and the stored key stay on the native (Rust) side.
   - `test-server/server.mjs`: a stand-in for the server, for checking the client by hand (test only)
   - `Casks/binone.rb`: source of the Homebrew cask
-  - `scripts/release.sh`: build, register the dmg, update the tap
+  - `scripts/release.sh`: pack the built app into a dmg, register the dmg, update the tap
 - `docs/release.md`: how to install the client with Homebrew and how to release it
 - `prototype/`: static HTML prototypes of the client screens (appearance only; dummy data).
   - `swimlane.html`: swimlane (kanban) of requests by lane
@@ -37,7 +37,7 @@ bun install
 bun run tauri dev      # run the app
 bun run typecheck && bun run lint && bun run test
 (cd src-tauri && cargo test)
-bun run tauri build    # binone.app under src-tauri/target/release/bundle/macos/ (the dmg is made by scripts/release.sh)
+bun run tauri build --bundles app   # binone.app under src-tauri/target/release/bundle/macos/ (the dmg is made by scripts/release.sh)
 ```
 
 Node.js 20.19 or later, bun, Rust and the Xcode Command Line Tools are required.

@@ -7,6 +7,9 @@ export default defineNuxtConfig({
   devtools: { enabled: false },
   // SPA: `nuxt generate` emits `.output/public/index.html` + client bundles (no SSR).
   ssr: false,
+  // No app manifest: the client would fetch it at startup (`/_nuxt/builds/meta/<id>.json`), which
+  // the app's CSP (`connect-src` allows only the IPC) blocks, and nothing here uses it.
+  experimental: { appManifest: false },
   // The client talks only to the binone server, so nothing is fetched from the internet at
   // runtime: web fonts are off and the icons in use are bundled into the client.
   ui: { fonts: false },

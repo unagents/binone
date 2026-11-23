@@ -1,0 +1,14 @@
+# Keeps the build machine's paths out of the binary. Without this, the panic messages of the
+# dependencies carry the absolute path of cargo's registry, which lies under the home directory
+# of whoever built the app.
+#
+# rustc's --remap-path-prefix needs the absolute prefix, and a cargo config cannot expand an
+# environment variable inside `rustflags`, so the flag is added by a wrapper that reads the
+# prefixes from the environment at build time. (`trim-paths` would do this in the profile, but
+# it is not available on the stable toolchain.) The wrapper's path is relative to src-tauri,
+# the directory that holds this `.cargo`.
+#
+# An environment variable RUSTC_WRAPPER (e.g. a compiler cache) takes precedence over this
+# setting and switches the remapping off; check the binary with `strings` in that case.
+[build]
+rustc-wrapper = ".cargo/remap-paths.sh"

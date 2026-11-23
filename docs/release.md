@@ -27,7 +27,7 @@ hosted elsewhere, pass its git URL as a second argument: `brew tap <user>/<name>
 
 ## Release
 
-A release has two parts. The app is built and signed by the release host's build service; then
+A release has two parts. The app is built and signed with Tauri's build on the release host; then
 one script packs it into a dmg, registers the dmg as an asset of the release `v<version>`,
 checks that it downloads without credentials, and writes the cask to the tap.
 
@@ -41,12 +41,27 @@ checks that it downloads without credentials, and writes the cask to the tap.
    (cd src-tauri && cargo test)
    ```
 
-3. Build `binone.app` with the build service of the release host: superbash's
-   `macbuild tauri`, with the project set to the absolute path of `client/` and the bundles
-   set to `app`. It runs `tauri build`, signs the app and reports the path of `binone.app`.
-   This is the only way the app is built for a release: the script does not build, and the
-   dmg is not made by Tauri (its dmg bundler drives Finder through AppleScript, which times
-   out on a host without a desktop session, error -1712).
+3. Build `binone.app`: run Tauri's build in `client/` with the bundle type `app` only, and
+   take the path of the `binone.app` it made to pass with `--app`. For example, with the
+   Tauri CLI:
+
+   ```sh
+   bun run tauri build --bundles app
+   # -> client/src-tauri/target/release/bundle/macos/binone.app
+   ```
+
+   The build signs the app (ad-hoc, as set in `tauri.conf.json`). The release script does not
+   build, and the dmg is not made by Tauri (its dmg bundler drives Finder through AppleScript,
+   which times out on a host without a desktop session, error -1712).
+
+   The build must not leave the build machine's paths in the binary. `src-tauri/.cargo/config.toml`
+   sets a rustc wrapper (`.cargo/remap-paths.sh`) that replaces the home directory and cargo's
+   directories with fixed names. A `RUSTC_WRAPPER` in the environment takes precedence over it
+   and switches this off, so check the result; this must print 0:
+
+   ```sh
+   strings src-tauri/target/release/bundle/macos/binone.app/Contents/MacOS/binone | grep -c "/Users/"
+   ```
 4. Rehearse with that app. Nothing is sent anywhere:
 
    ```sh
@@ -89,8 +104,11 @@ the dmg anonymously. The script checks this before it touches the tap.
 
 `BINONE_DIST_BASE_URL` is written into the cask, which is public. The script therefore stops
 with exit code 2, before anything is sent, when that URL is not `https` or when its host is an
-IP address. Pass `--allow-insecure-dist` to release to such a URL anyway. With `--dry-run` and
-no `BINONE_DIST_BASE_URL`, the cask is rendered with a placeholder URL and the script says so.
+IP address. Pass `--allow-insecure-dist` to release to such a URL anyway; over `http` the
+token for the release API is sent in clear text as well, and the script warns about it. The
+URL may only have letters, digits and `._~:/[]-`, and `BINONE_DIST_FORGE=github` is accepted
+only for a URL on `github.com`; otherwise the script stops with exit code 2. With `--dry-run`
+and no `BINONE_DIST_BASE_URL`, the cask is rendered with a placeholder URL and the script says so.
 
 URLs are printed without the credentials they may carry.
 
@@ -102,8 +120,8 @@ URLs are printed without the credentials they may carry.
 - `--dry-run`: make the dmg (or take `--dmg`), compute the sha256, render the cask to
   `client/src-tauri/target/release-work/binone.rb` and print what would be done.
 - `--skip-upload`: the release with the dmg was already registered and published by another
-  tool (for example superbash's `gitea release create` or `github release create`); only
-  verify the download and update the tap.
+  tool (for example the host's web page or its command-line client); only verify the download
+  and update the tap.
 - `--allow-insecure-dist`: accept a `BINONE_DIST_BASE_URL` that is not `https` or whose host
   is an IP address.
 
@@ -111,15 +129,20 @@ Exit codes: 0 done; 1 a step failed; 2 wrong usage or settings, with nothing sen
 
 ### What the script does on the release host
 
-1. Creates the release `v<version>` as a draft, at the commit that is checked out. A draft is
+1. Before anything is sent, checks that the tap and its branch exist (`git ls-remote`), that
+   the repository that holds the dmg has the commit that is checked out, and that neither the
+   tag `v<version>` nor a release of that name exists there yet. It stops when one of these
+   does not hold.
+2. Creates the release `v<version>` as a draft, at the commit that is checked out. A draft is
    not visible to others.
-2. Attaches the dmg to the draft and compares what the host stored (name, size, and the digest
+3. Attaches the dmg to the draft and compares what the host stored (name, size, and the digest
    when the host reports one) with the file that was sent.
-3. Publishes the release.
-4. Downloads the dmg from its public URL without credentials and compares the sha256. A draft
-   cannot be fetched without credentials, so this check can only come after publishing; when
-   it fails, the script puts the release back to a draft and stops.
-5. Clones the tap, writes `Casks/binone.rb`, commits that file only and pushes. The commit's
+4. Publishes the release.
+5. Downloads the dmg from its public URL without credentials and compares the sha256. A
+   redirect is followed to `https` only. A draft cannot be fetched without credentials, so
+   this check can only come after publishing; when it fails, the script puts the release back
+   to a draft and stops.
+6. Clones the tap, writes `Casks/binone.rb`, commits that file only and pushes. The commit's
    author is set in the clone (`claude.cli`), not taken from the settings of whoever runs the
    script.
 
@@ -151,6 +174,9 @@ The script says which of these happened.
   cause and run again.
 - Failed while attaching the dmg, or the attached file did not match: a draft release exists
   and is not public. Delete the draft on the host, then run again.
+- The host answered to creating the release, but not with the JSON of its API: the script
+  says so. Check `BINONE_DIST_BASE_URL` and `BINONE_DIST_FORGE`; if a draft release now exists
+  on the host, delete it, then run again.
 - Failed while publishing: the draft has the dmg and is not public. Either delete the draft
   and run again, or publish it on the host and run again with
   `--dmg <the same dmg> --skip-upload`.

@@ -3,8 +3,9 @@
 #
 # Usage: client/scripts/release.sh (--app <path> | --dmg <path>) [--dry-run] [--skip-upload]
 #                                  [--allow-insecure-dist]
-#   --app <path>   The signed binone.app to release. Build it first with the host's build service
-#                  (bundle type `app` only) and pass the path it reports. The script packs it into
+#   --app <path>   The signed binone.app to release. Build it first in client/ with Tauri's build
+#                  (bundle type `app` only, e.g. `bun run tauri build --bundles app`) and pass the
+#                  path of the binone.app it made. The script packs it into
 #                  binone_<version>_aarch64.dmg with hdiutil (no Finder, no AppleScript).
 #   --dmg <path>   Use an already made dmg instead of --app. Its name must be
 #                  binone_<version>_aarch64.dmg.
@@ -16,7 +17,8 @@
 #   --allow-insecure-dist
 #                  Accept a BINONE_DIST_BASE_URL that is not https or whose host is an IP address.
 #                  Without this the script stops (exit code 2) before anything is sent, because
-#                  that URL is written into the cask that users install from.
+#                  that URL is written into the cask that users install from. Over http the
+#                  token for the release API travels in clear text as well.
 #
 # The version is the one in client/package.json (bump it in a commit before releasing).
 #
@@ -26,7 +28,8 @@
 #                         <owner>/<repo> (required unless --dry-run)
 #   BINONE_TAP_URL        git URL of the tap repository (required unless --dry-run)
 #   BINONE_TAP_BRANCH     branch of the tap to update (default: main)
-#   BINONE_DIST_FORGE     gitea | github (default: github when the host is github.com, else gitea)
+#   BINONE_DIST_FORGE     gitea | github (default: github when the host is github.com, else gitea;
+#                         github is accepted for the host github.com only)
 #
 # Credentials: the token for the release API comes from `git credential fill` at run time and is
 # never written to a file or printed. The tap is pushed with git's own credential handling.
@@ -36,7 +39,7 @@
 set -euo pipefail
 
 usage() {
-  sed -n '2,35p' "$0" | sed 's/^# \{0,1\}//' >&2
+  sed -n '2,38p' "$0" | sed 's/^# \{0,1\}//' >&2
   exit 2
 }
 
@@ -123,6 +126,10 @@ fi
 DIST_BASE_URL="$(strip_url "$DIST_BASE_URL")"
 [[ "$DIST_BASE_URL" =~ ^https?://[^/]+(/[^/]+)*/[^/]+/[^/]+$ ]] ||
   refuse "BINONE_DIST_BASE_URL must be an http(s) URL ending in <owner>/<repo>: $DIST_BASE_URL"
+# The URL is written into the cask (a Ruby string) and passed to sed and curl, so only characters
+# that mean nothing special in any of them are accepted.
+[[ "$DIST_BASE_URL" =~ ^[][A-Za-z0-9._~:/-]+$ ]] ||
+  refuse "BINONE_DIST_BASE_URL may only have letters, digits and ._~:/[]- (it is written into the cask): $DIST_BASE_URL"
 DIST_REPO="$(printf '%s' "$DIST_BASE_URL" | sed -E 's#^.*/([^/]+/[^/]+)$#\1#')"
 DIST_ROOT="${DIST_BASE_URL%/"$DIST_REPO"}"
 DIST_HOST="$(printf '%s' "$DIST_ROOT" | sed -E 's#^https?://([^/]+).*$#\1#')" # may carry a port
@@ -132,7 +139,13 @@ if [[ -z "$DIST_FORGE" ]]; then
   if [[ "$DIST_HOST" == "github.com" ]]; then DIST_FORGE=github; else DIST_FORGE=gitea; fi
 fi
 case "$DIST_FORGE" in
-  github) API="https://api.github.com/repos/$DIST_REPO" ;;
+  github)
+    # The token is looked up for the host of BINONE_DIST_BASE_URL and sent to api.github.com, so
+    # the two must be the same site.
+    [[ "$DIST_HOST" == "github.com" && "$DIST_ROOT" == "$DIST_PROTO://github.com" ]] ||
+      refuse "BINONE_DIST_FORGE=github needs a BINONE_DIST_BASE_URL on github.com (https://github.com/<owner>/<repo>): $DIST_BASE_URL"
+    API="https://api.github.com/repos/$DIST_REPO"
+    ;;
   gitea) API="$DIST_ROOT/api/v1/repos/$DIST_REPO" ;;
   *) refuse "BINONE_DIST_FORGE must be gitea or github: $DIST_FORGE" ;;
 esac
@@ -151,6 +164,8 @@ fi
 if [[ -n "$DIST_INSECURE" ]]; then
   if [[ "$ALLOW_INSECURE_DIST" == 1 ]]; then
     echo "warning: BINONE_DIST_BASE_URL is accepted although $DIST_INSECURE (--allow-insecure-dist): $DIST_BASE_URL"
+    [[ "$DIST_PROTO" == https ]] ||
+      echo "warning: over http the token for the release API is sent in clear text too, not only the dmg"
   else
     refuse "BINONE_DIST_BASE_URL is refused because $DIST_INSECURE: $DIST_BASE_URL
        This URL is written into the cask. Use an https URL with a host name, or pass
@@ -179,6 +194,11 @@ if [[ "$DRY_RUN" == 0 ]]; then
   git -C "$REPO_DIR" fetch -q origin 2>&1 | redact >&2 || die "git fetch origin failed"
   [[ -n "$(git -C "$REPO_DIR" branch -r --contains "$HEAD_SHA")" ]] ||
     die "HEAD ($HEAD_SHA) is not pushed to origin; the release tag needs it there"
+  # The tap is written last, after the release is public: make sure it is there before anything is sent.
+  TAP_HEADS="$(git ls-remote --heads "$TAP_URL" "$TAP_BRANCH" 2> >(redact >&2))" ||
+    die "could not read the tap ($TAP_URL_SHOWN). Nothing was sent."
+  [[ -n "$TAP_HEADS" ]] ||
+    die "the tap ($TAP_URL_SHOWN) has no branch $TAP_BRANCH. Nothing was sent."
 fi
 
 mkdir -p "$WORK"
@@ -259,12 +279,23 @@ fi
 # --- register the dmg ---------------------------------------------------------------------------
 # The token goes to curl through a config read from a pipe, so it never shows up in a file,
 # in the process list or in this script's output.
+# Tracing (bash -x) is switched off while the token is held, so a trace does not show it either.
 api() {
-  local token
+  local traced=0 status=0 token=""
+  [[ $- != *x* ]] || traced=1
+  { set +x; } 2>/dev/null
   token="$(printf 'protocol=%s\nhost=%s\n\n' "$DIST_PROTO" "$DIST_HOST" |
-    GIT_TERMINAL_PROMPT=0 git credential fill 2>/dev/null | sed -n 's/^password=//p')"
-  [[ -n "$token" ]] || die "git credential fill returned no credential for $DIST_PROTO://$DIST_HOST"
-  curl -sS -K <(auth_config "$token") "$@"
+    GIT_TERMINAL_PROMPT=0 git credential fill 2>/dev/null | sed -n 's/^password=//p')" || true
+  if [[ -n "$token" ]]; then
+    # -q: no ~/.curlrc, so nothing from it (a proxy, another header) applies to the call with the token.
+    curl -q -sS -K <(auth_config "$token") "$@" || status=$?
+    token=""
+  else
+    status=90
+  fi
+  [[ "$traced" == 0 ]] || set -x
+  [[ "$status" != 90 ]] || die "git credential fill returned no credential for $DIST_PROTO://$DIST_HOST"
+  return "$status"
 }
 # The curl config line that carries the token. Inside the double quotes of a curl config a
 # backslash and a double quote are written with a backslash before them.
@@ -280,6 +311,15 @@ api_message() {
     try { const m = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).message;
           if (typeof m === "string") console.log(m.slice(0, 300)); } catch {}' "$1" 2>/dev/null | redact
 }
+# One field of the JSON answer in a file; prints nothing when the answer is not JSON or has no such field.
+json_field() { # <file> <field>
+  node -e '
+    try { const v = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"))[process.argv[2]];
+          if (typeof v === "string" || typeof v === "number") console.log(String(v)); } catch {}' "$1" "$2" 2>/dev/null
+}
+NOT_JSON_HINT="The host did not answer with the JSON of the $DIST_FORGE API. Check that BINONE_DIST_BASE_URL
+       points at the repository itself and that BINONE_DIST_FORGE names its API (a proxy or a
+       login page may have answered instead)."
 set_draft() { # <true|false>; prints the HTTP status
   api -o "$WORK/publish.json" -w '%{http_code}' -X PATCH -H 'Content-Type: application/json' \
     -d "{\"draft\": $1}" "$API/releases/$RELEASE_ID"
@@ -288,14 +328,30 @@ set_draft() { # <true|false>; prints the HTTP status
 RELEASE_ID=""
 if [[ "$SKIP_UPLOAD" == 0 ]]; then
   # The release stays a draft (not visible, no tag) until the dmg is attached to it.
-  step "create release $TAG as a draft"
+  # Checked before anything is created: the release's tag is made at HEAD on that repository, so
+  # the commit must be there, and neither the tag nor the release may exist yet.
+  step "check that $DIST_BASE_URL is ready for $TAG"
+  CODE="$(api -o /dev/null -w '%{http_code}' "$API/git/commits/$HEAD_SHA")"
+  [[ "$CODE" == 200 ]] ||
+    die "the repository that holds the dmg does not have the commit $HEAD_SHA (HTTP $CODE).
+       Push it there first. Nothing was sent."
+  if [[ "$DIST_FORGE" == github ]]; then TAG_API="$API/git/ref/tags/$TAG"; else TAG_API="$API/tags/$TAG"; fi
+  CODE="$(api -o /dev/null -w '%{http_code}' "$TAG_API")"
+  [[ "$CODE" == 404 ]] ||
+    die "the tag $TAG already exists on the repository that holds the dmg, or cannot be checked (HTTP $CODE).
+       Bump the version, or remove the tag there if it is a leftover. Nothing was sent."
   CODE="$(api -o /dev/null -w '%{http_code}' "$API/releases/tags/$TAG")"
-  [[ "$CODE" == 404 ]] || die "release $TAG already exists or cannot be checked (HTTP $CODE)"
+  [[ "$CODE" == 404 ]] || die "release $TAG already exists or cannot be checked (HTTP $CODE). Nothing was sent."
+
+  step "create release $TAG as a draft"
   BODY="$(node -e 'console.log(JSON.stringify({tag_name: process.argv[1], target_commitish: process.argv[2], name: process.argv[1], body: "", draft: true}))' "$TAG" "$HEAD_SHA")"
   CODE="$(api -o "$WORK/release.json" -w '%{http_code}' -X POST -H 'Content-Type: application/json' -d "$BODY" "$API/releases")"
   [[ "$CODE" == 201 ]] || die "creating the release failed (HTTP $CODE): $(api_message "$WORK/release.json")"
-  RELEASE_ID="$(node -p "require('$WORK/release.json').id")"
-  [[ "$RELEASE_ID" =~ ^[0-9]+$ ]] || die "the release was created, but its id could not be read"
+  RELEASE_ID="$(json_field "$WORK/release.json" id)"
+  [[ "$RELEASE_ID" =~ ^[0-9]+$ ]] ||
+    die "the host answered HTTP 201 to creating the release, but the release's id could not be read.
+       $NOT_JSON_HINT
+       If a draft release $TAG now exists there, delete it before running again."
 
   step "attach $DMG_NAME"
   if [[ "$DIST_FORGE" == github ]]; then
@@ -310,14 +366,18 @@ if [[ "$SKIP_UPLOAD" == 0 ]]; then
        The draft release $TAG (id $RELEASE_ID) is left without it and is not public; delete the draft and run again."
   # What the host stored must be the file that was sent.
   ASSET_CHECK="$(node -e '
-    const a = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"));
+    let a;
+    try { a = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")); } catch {}
     const [name, size, sha] = process.argv.slice(2);
-    if (a.name !== name) console.log(`its name is ${a.name}`);
+    if (a === null || typeof a !== "object") console.log("the answer is not JSON");
+    else if (a.name !== name) console.log(`its name is ${String(a.name).slice(0, 100)}`);
     else if (String(a.size) !== size) console.log(`its size is ${a.size}, not ${size}`);
     else if (typeof a.digest === "string" && a.digest !== `sha256:${sha}`) console.log("its digest differs");
   ' "$WORK/asset.json" "$DMG_NAME" "$DMG_SIZE" "$DMG_SHA")"
   [[ -z "$ASSET_CHECK" ]] ||
-    die "the attached dmg is not what was sent ($ASSET_CHECK). The draft release $TAG (id $RELEASE_ID) is not public; delete the draft and run again."
+    die "the attached dmg could not be confirmed as what was sent ($ASSET_CHECK).
+       $NOT_JSON_HINT
+       The draft release $TAG (id $RELEASE_ID) is not public; delete the draft and run again."
 
   step "publish release $TAG"
   CODE="$(set_draft false)"
@@ -338,9 +398,11 @@ back_to_draft() {
     echo "release $TAG (id $RELEASE_ID) could not be put back to a draft: it is PUBLIC; withdraw it on the host" >&2
   fi
 }
-if ! curl -fsSL --proto '=https,http' -o "$WORK/download.dmg" "$DMG_URL"; then
+# -q: no ~/.curlrc. A redirect is followed to https only, so the download cannot be moved to
+# plain http on the way (brew refuses that too).
+if ! curl -q -fsSL --proto '=https,http' --proto-redir '=https' -o "$WORK/download.dmg" "$DMG_URL"; then
   back_to_draft
-  die "could not download $DMG_URL without credentials (is the repository public?)"
+  die "could not download $DMG_URL without credentials (is the repository public? a redirect to http is not followed)"
 fi
 GOT_SHA="$(shasum -a 256 "$WORK/download.dmg" | cut -d' ' -f1)"
 if [[ "$GOT_SHA" != "$DMG_SHA" ]]; then
@@ -352,7 +414,8 @@ fi
 step "update the tap"
 TAP_DIR="$(mktemp -d "$WORK/tap.XXXXXX")"
 git clone -q --depth 1 --branch "$TAP_BRANCH" "$TAP_URL" "$TAP_DIR" 2>&1 | redact >&2 ||
-  die "could not clone the tap ($TAP_URL_SHOWN, branch $TAP_BRANCH)"
+  die "could not clone the tap ($TAP_URL_SHOWN, branch $TAP_BRANCH). The release $TAG is published;
+       fix the cause and run again with --dmg <the same dmg> --skip-upload."
 # The commit's author is fixed here, so it never comes from the personal settings of whoever runs this.
 git -C "$TAP_DIR" config user.name claude.cli
 git -C "$TAP_DIR" config user.email claude.cli@local.host

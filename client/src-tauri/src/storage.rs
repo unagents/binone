@@ -196,6 +196,40 @@ mod tests {
     }
 
     #[test]
+    fn a_failed_save_leaves_the_saved_file_as_it_was() {
+        let dir = TestDir::new();
+        let data = dir.path().join("data");
+        let path = data.join(FILE_NAME);
+        save(&path, &endpoint(), "k1").unwrap();
+        let before = fs::read(&path).unwrap();
+
+        // The directory can no longer be written to, so the new contents cannot be put beside
+        // the file.
+        fs::set_permissions(&data, Permissions::from_mode(0o500)).unwrap();
+        let other = Endpoint { host: Ipv4Addr::new(10, 0, 0, 2), port: None };
+        let error = save(&path, &other, "k2").unwrap_err();
+        fs::set_permissions(&data, Permissions::from_mode(0o700)).unwrap();
+        assert_eq!(error.kind, ErrorKind::Storage);
+        assert!(error.detail.starts_with("creating the settings file: "), "{}", error.detail);
+
+        // The earlier address and key are still there, byte for byte, and nothing is left beside them.
+        assert_eq!(fs::read(&path).unwrap(), before);
+        assert_eq!(load(&path), Ok(Some((endpoint(), Some("k1".to_owned())))));
+        assert_eq!(mode(&path), 0o600);
+        assert_eq!(fs::read_dir(&data).unwrap().count(), 1);
+
+        // The new contents were written but cannot be moved into place (the place is taken by a
+        // directory that is not empty): what is there stays, and the partial file is removed.
+        let taken = dir.path().join("taken");
+        fs::create_dir_all(taken.join(FILE_NAME).join("kept")).unwrap();
+        let error = save(&taken.join(FILE_NAME), &other, "k2").unwrap_err();
+        assert_eq!(error.kind, ErrorKind::Storage);
+        assert!(error.detail.starts_with("replacing the settings file: "), "{}", error.detail);
+        assert!(taken.join(FILE_NAME).join("kept").is_dir());
+        assert_eq!(fs::read_dir(&taken).unwrap().count(), 1);
+    }
+
+    #[test]
     fn a_failed_save_reports_why_without_the_key() {
         let dir = TestDir::new();
         // The "directory" is a file, so nothing can be written under it.
