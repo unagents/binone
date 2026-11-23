@@ -45,10 +45,10 @@ export function useUpdate() {
       const answer = await callNative<unknown>("run_update");
       outcome.value = isUpdateOutcome(answer)
         ? answer
-        : { state: "finished", ok: false, code: null, step: "update", output: "the answer has an unexpected shape" };
+        : { state: "finished", ok: false, code: null, step: "update", output: "the answer has an unexpected shape", timed_out: false };
     } catch (error) {
       const detail = typeof error === "string" ? error : "the update could not be run";
-      outcome.value = { state: "finished", ok: false, code: null, step: "update", output: detail };
+      outcome.value = { state: "finished", ok: false, code: null, step: "update", output: detail, timed_out: false };
     } finally {
       updating.value = false;
     }

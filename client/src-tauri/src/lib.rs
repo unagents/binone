@@ -119,28 +119,30 @@ async fn api_call(
     gateway.call(&settings, &op, args).await
 }
 
-/// The version check: the running version against the latest published release. It never fails
-/// as a command; a failure is an `unknown` answer with its reason.
+/// How an update would be done from here: Homebrew, or by hand. Runs `brew list` at most once.
+fn detect_plan() -> update::Plan {
+    let bundled = std::env::current_exe().is_ok_and(|exe| update::is_app_bundle(&exe));
+    update::plan(bundled, &|path| path.is_file(), &update::SystemRunner)
+}
+
+/// The version check: the running version against the latest published release, and (only when
+/// there is a newer one) how it could be installed. It never fails as a command; a failure is an
+/// `unknown` answer with its reason.
 #[tauri::command]
 async fn check_update(app: AppHandle) -> update::UpdateCheck {
-    update::check(&app.package_info().version.to_string(), update::fetch_latest).await
+    let method = || async {
+        // Runs a program and waits for it: off the async threads.
+        let found = tauri::async_runtime::spawn_blocking(|| detect_plan().method()).await;
+        found.unwrap_or(update::UpdateMethod::Manual { reason: update::ManualReason::NotInstalledByCask })
+    };
+    update::check(&app.package_info().version.to_string(), update::fetch_latest, method).await
 }
 
 /// The update through Homebrew, or `manual` when it cannot be run from here (no Homebrew, or
-/// this app was not installed by the cask). One at a time.
+/// this app was not installed by the cask). One at a time, and within a time limit.
 #[tauri::command]
 async fn run_update(gate: State<'_, update::UpdateGate>) -> Result<update::UpdateOutcome, String> {
-    let Some(_running) = gate.enter() else {
-        return Ok(update::UpdateOutcome::Busy);
-    };
-    // Runs programs and waits for them: off the async threads.
-    tauri::async_runtime::spawn_blocking(|| {
-        let bundled = std::env::current_exe().is_ok_and(|exe| update::is_app_bundle(&exe));
-        let plan = update::plan(bundled, &|path| path.is_file(), &update::SystemRunner);
-        update::run_update(&plan, &update::SystemRunner)
-    })
-    .await
-    .map_err(|e| format!("the update could not be run: {e}"))
+    update::run_exclusive(&gate, || update::run_update(&detect_plan(), &update::SystemRunner, update::UPDATE_TIME_LIMIT)).await
 }
 
 /// Starts the app again (after an update the new version starts).

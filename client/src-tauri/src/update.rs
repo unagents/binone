@@ -10,9 +10,11 @@
 //! as an argument or a trait, so the decisions can be tested without a network or a real brew.
 
 use std::future::Future;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use serde::Serialize;
 
@@ -28,6 +30,10 @@ const CASK: &str = "binone";
 const BREW_CANDIDATES: [&str; 2] = ["/opt/homebrew/bin/brew", "/usr/local/bin/brew"];
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+/// The whole update (`brew update` and `brew upgrade`) may take this long.
+pub const UPDATE_TIME_LIMIT: Duration = Duration::from_secs(10 * 60);
+/// The one brew call made to find out how to update (`brew list --cask binone`).
+pub const LIST_TIME_LIMIT: Duration = Duration::from_secs(10);
 const OUTPUT_TAIL_LINES: usize = 20;
 const OUTPUT_TAIL_CHARS: usize = 2000;
 
@@ -75,8 +81,19 @@ pub struct CheckFailure(pub String);
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum UpdateCheck {
     UpToDate { current: String, latest: String },
-    Available { current: String, latest: String },
+    /// `method` is how the update can be done from here, found out only for this state.
+    Available { current: String, latest: String, method: UpdateMethod },
     Unknown { current: String, reason: String },
+}
+
+/// How a newer version can be installed from this app.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum UpdateMethod {
+    /// Homebrew can do it (the "update" button is offered).
+    Brew,
+    /// It cannot be run from here: the release page and the command are offered instead.
+    Manual { reason: ManualReason },
 }
 
 /// The status and the body of an HTTP answer.
@@ -111,11 +128,15 @@ pub fn interpret_release(answer: &HttpAnswer) -> Result<Version, CheckFailure> {
     }
 }
 
-/// Compares the running version with the latest one. `fetch` gets the answer of GitHub's API.
-pub async fn check<F, Fut>(current: &str, fetch: F) -> UpdateCheck
+/// Compares the running version with the latest one. `fetch` gets the answer of GitHub's API;
+/// `method` finds out how an update could be done, and is called only when there is a newer
+/// version (so nothing about Homebrew is looked at otherwise).
+pub async fn check<F, Fut, M, MFut>(current: &str, fetch: F, method: M) -> UpdateCheck
 where
     F: FnOnce() -> Fut,
     Fut: Future<Output = Result<HttpAnswer, CheckFailure>>,
+    M: FnOnce() -> MFut,
+    MFut: Future<Output = UpdateMethod>,
 {
     let unknown = |reason: String| UpdateCheck::Unknown { current: current.to_owned(), reason };
     let Some(running) = Version::parse(current) else {
@@ -127,7 +148,7 @@ where
     };
     let (current, latest) = (running.to_string(), latest.to_string());
     if Version::parse(&latest) > Some(running) {
-        UpdateCheck::Available { current, latest }
+        UpdateCheck::Available { current, latest, method: method().await }
     } else {
         UpdateCheck::UpToDate { current, latest }
     }
@@ -174,27 +195,80 @@ pub async fn fetch_latest() -> Result<HttpAnswer, CheckFailure> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RunOutput {
     pub code: Option<i32>,
-    /// Standard output, then standard error.
+    /// Standard output, then standard error (what there was when the program was stopped, too).
     pub text: String,
+    /// The program did not finish within its time limit and was killed.
+    pub timed_out: bool,
 }
 
-/// Runs a program with its arguments (never through a shell).
+/// Runs a program with its arguments (never through a shell). A program that is still running
+/// after `limit` is killed and reaped, and the answer says so.
 pub trait Runner {
-    fn run(&self, program: &Path, args: &[&str]) -> Result<RunOutput, String>;
+    fn run(&self, program: &Path, args: &[&str], limit: Duration) -> Result<RunOutput, String>;
 }
 
 pub struct SystemRunner;
 
+/// Collects what a pipe delivers, so that what came before a kill can still be read.
+fn collect<R: Read + Send + 'static>(mut pipe: R) -> (Arc<Mutex<Vec<u8>>>, std::thread::JoinHandle<()>) {
+    let buffer = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&buffer);
+    let reader = std::thread::spawn(move || {
+        let mut chunk = [0u8; 4096];
+        while let Ok(n) = pipe.read(&mut chunk) {
+            if n == 0 {
+                break;
+            }
+            sink.lock().unwrap_or_else(|e| e.into_inner()).extend_from_slice(&chunk[..n]);
+        }
+    });
+    (buffer, reader)
+}
+
+fn text_of(buffer: &Mutex<Vec<u8>>) -> String {
+    String::from_utf8_lossy(&buffer.lock().unwrap_or_else(|e| e.into_inner())).into_owned()
+}
+
 impl Runner for SystemRunner {
-    fn run(&self, program: &Path, args: &[&str]) -> Result<RunOutput, String> {
-        let output = std::process::Command::new(program)
+    fn run(&self, program: &Path, args: &[&str], limit: Duration) -> Result<RunOutput, String> {
+        use std::process::Stdio;
+        let started = |e: std::io::Error| format!("could not start {}: {}", program.display(), e.kind());
+        let mut child = std::process::Command::new(program)
             .args(args)
-            .stdin(std::process::Stdio::null())
-            .output()
-            .map_err(|e| format!("could not start {}: {}", program.display(), e.kind()))?;
-        let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
-        text.push_str(&String::from_utf8_lossy(&output.stderr));
-        Ok(RunOutput { code: output.status.code(), text })
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(started)?;
+        let (stdout, out_reader) = collect(child.stdout.take().ok_or("no standard output")?);
+        let (stderr, err_reader) = collect(child.stderr.take().ok_or("no standard error")?);
+        let deadline = Instant::now() + limit;
+        let (code, timed_out) = loop {
+            match child.try_wait() {
+                Ok(Some(status)) => break (status.code(), false),
+                Ok(None) if Instant::now() >= deadline => {
+                    // Kill, then wait: the child must not be left as a zombie.
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    break (None, true);
+                }
+                Ok(None) => std::thread::sleep(Duration::from_millis(20)),
+                Err(e) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(format!("could not wait for {}: {}", program.display(), e.kind()));
+                }
+            }
+        };
+        if !timed_out {
+            // The program has ended, so the pipes reach their end (unless it left a child
+            // holding them; after a kill the readers are not waited for, for that reason).
+            let _ = out_reader.join();
+            let _ = err_reader.join();
+        }
+        let mut text = text_of(&stdout);
+        text.push_str(&text_of(&stderr));
+        Ok(RunOutput { code, text, timed_out })
     }
 }
 
@@ -236,11 +310,22 @@ pub fn plan(bundled: bool, exists: &dyn Fn(&Path) -> bool, runner: &dyn Runner) 
     let Some(brew) = find_brew(exists) else {
         return Plan::Manual(ManualReason::NoBrew);
     };
-    let installed = bundled && matches!(runner.run(&brew, &["list", "--cask", CASK]), Ok(RunOutput { code: Some(0), .. }));
+    let installed = bundled
+        && matches!(runner.run(&brew, &["list", "--cask", CASK], LIST_TIME_LIMIT), Ok(RunOutput { code: Some(0), timed_out: false, .. }));
     if installed {
         Plan::Brew(brew)
     } else {
         Plan::Manual(ManualReason::NotInstalledByCask)
+    }
+}
+
+impl Plan {
+    /// What the check tells the screen about this plan.
+    pub fn method(&self) -> UpdateMethod {
+        match self {
+            Plan::Brew(_) => UpdateMethod::Brew,
+            Plan::Manual(reason) => UpdateMethod::Manual { reason: *reason },
+        }
     }
 }
 
@@ -253,7 +338,8 @@ pub enum UpdateOutcome {
     /// Another update is running.
     Busy,
     /// Run to the end or to the first failing step. `output` is the end of its output.
-    Finished { ok: bool, code: Option<i32>, step: String, output: String },
+    /// `timed_out`: the step did not end within the time limit and was killed.
+    Finished { ok: bool, code: Option<i32>, step: String, output: String, timed_out: bool },
 }
 
 /// The last lines of `text`, limited in size.
@@ -264,21 +350,24 @@ pub fn tail(text: &str) -> String {
     joined.chars().skip(skip).collect()
 }
 
-/// Runs the update as planned.
-pub fn run_update(plan: &Plan, runner: &dyn Runner) -> UpdateOutcome {
+/// Runs the update as planned. `limit` is for the whole update: each step gets what is left of
+/// it, and a step that goes past it is killed.
+pub fn run_update(plan: &Plan, runner: &dyn Runner, limit: Duration) -> UpdateOutcome {
     let brew = match plan {
         Plan::Manual(reason) => return UpdateOutcome::Manual { reason: *reason, command: MANUAL_COMMAND, url: RELEASES_PAGE_URL },
         Plan::Brew(brew) => brew,
     };
+    let deadline = Instant::now() + limit;
     let mut last = UpdateOutcome::Busy;
     for args in update_steps() {
         let step = format!("brew {}", args.join(" "));
-        last = match runner.run(brew, &args) {
-            Err(text) => return UpdateOutcome::Finished { ok: false, code: None, step, output: text },
-            Ok(RunOutput { code, text }) if code != Some(0) => {
-                return UpdateOutcome::Finished { ok: false, code, step, output: tail(&text) }
+        let left = deadline.saturating_duration_since(Instant::now());
+        last = match runner.run(brew, &args, left) {
+            Err(text) => return UpdateOutcome::Finished { ok: false, code: None, step, output: text, timed_out: false },
+            Ok(RunOutput { code, text, timed_out }) if timed_out || code != Some(0) => {
+                return UpdateOutcome::Finished { ok: false, code, step, output: tail(&text), timed_out }
             }
-            Ok(RunOutput { code, text }) => UpdateOutcome::Finished { ok: true, code, step, output: tail(&text) },
+            Ok(RunOutput { code, text, .. }) => UpdateOutcome::Finished { ok: true, code, step, output: tail(&text), timed_out: false },
         };
     }
     last
@@ -296,6 +385,18 @@ impl UpdateGate {
     }
 }
 
+/// Runs `work` (which waits for programs) off the async threads, one at a time. However it ends
+/// (a failure, a timeout, a panic), the gate is open again afterwards.
+pub async fn run_exclusive<W>(gate: &UpdateGate, work: W) -> Result<UpdateOutcome, String>
+where
+    W: FnOnce() -> UpdateOutcome + Send + 'static,
+{
+    let Some(_running) = gate.enter() else {
+        return Ok(UpdateOutcome::Busy);
+    };
+    tauri::async_runtime::spawn_blocking(work).await.map_err(|e| format!("the update could not be run: {e}"))
+}
+
 impl Drop for UpdateRunning<'_> {
     fn drop(&mut self) {
         self.0 .0.store(false, Ordering::SeqCst);
@@ -306,7 +407,7 @@ impl Drop for UpdateRunning<'_> {
 mod tests {
     use super::*;
     use crate::server::testing::run;
-    use std::cell::RefCell;
+    use std::cell::{Cell, RefCell};
 
     fn answer(status: u16, body: &str) -> HttpAnswer {
         HttpAnswer { status, body: body.to_owned() }
@@ -317,7 +418,7 @@ mod tests {
     }
 
     fn checked(current: &str, result: Result<HttpAnswer, CheckFailure>) -> UpdateCheck {
-        run(check(current, || async { result }))
+        run(check(current, || async { result }, || async { UpdateMethod::Brew }))
     }
 
     #[test]
@@ -345,7 +446,7 @@ mod tests {
     #[test]
     fn a_newer_release_is_available() {
         let check = checked("0.2.0", Ok(release("v0.10.0")));
-        assert_eq!(check, UpdateCheck::Available { current: "0.2.0".into(), latest: "0.10.0".into() });
+        assert_eq!(check, UpdateCheck::Available { current: "0.2.0".into(), latest: "0.10.0".into(), method: UpdateMethod::Brew });
     }
 
     #[test]
@@ -399,9 +500,36 @@ mod tests {
     }
 
     #[test]
-    fn the_check_serializes_with_a_state() {
+    fn the_check_serializes_with_a_state_and_a_method() {
         let text = serde_json::to_string(&checked("0.2.0", Ok(release("v0.3.0")))).unwrap();
-        assert_eq!(text, r#"{"state":"available","current":"0.2.0","latest":"0.3.0"}"#);
+        assert_eq!(text, r#"{"state":"available","current":"0.2.0","latest":"0.3.0","method":{"kind":"brew"}}"#);
+        let manual = UpdateCheck::Available {
+            current: "0.2.0".into(),
+            latest: "0.3.0".into(),
+            method: UpdateMethod::Manual { reason: ManualReason::NoBrew },
+        };
+        let text = serde_json::to_string(&manual).unwrap();
+        assert!(text.ends_with(r#""method":{"kind":"manual","reason":"no_brew"}}"#), "{text}");
+    }
+
+    #[test]
+    fn the_way_to_update_is_judged_only_for_a_newer_version() {
+        let asked = Cell::new(0);
+        let judge = |current: &str, tag: &str, method: UpdateMethod| {
+            run(check(current, || async { Ok(release(tag)) }, || async {
+                asked.set(asked.get() + 1);
+                method
+            }))
+        };
+        let manual = UpdateMethod::Manual { reason: ManualReason::NotInstalledByCask };
+        let found = judge("0.2.0", "v0.3.0", manual);
+        assert_eq!(found, UpdateCheck::Available { current: "0.2.0".into(), latest: "0.3.0".into(), method: manual });
+        assert_eq!(asked.get(), 1);
+        // Up to date, or no answer from GitHub: Homebrew is not looked at.
+        assert!(matches!(judge("0.2.0", "v0.2.0", UpdateMethod::Brew), UpdateCheck::UpToDate { .. }));
+        assert!(matches!(judge("0.2.0", "latest", UpdateMethod::Brew), UpdateCheck::Unknown { .. }));
+        assert!(matches!(judge("dev", "v0.3.0", UpdateMethod::Brew), UpdateCheck::Unknown { .. }));
+        assert_eq!(asked.get(), 1);
     }
 
     #[test]
@@ -430,24 +558,36 @@ mod tests {
     struct Fake {
         script: RefCell<Vec<Result<RunOutput, String>>>,
         calls: RefCell<Vec<String>>,
+        limits: RefCell<Vec<Duration>>,
     }
 
     impl Fake {
         fn new(script: Vec<Result<RunOutput, String>>) -> Self {
-            Fake { script: RefCell::new(script), calls: RefCell::new(Vec::new()) }
+            Fake { script: RefCell::new(script), calls: RefCell::new(Vec::new()), limits: RefCell::new(Vec::new()) }
         }
     }
 
     impl Runner for Fake {
-        fn run(&self, program: &Path, args: &[&str]) -> Result<RunOutput, String> {
+        fn run(&self, program: &Path, args: &[&str], limit: Duration) -> Result<RunOutput, String> {
+            self.limits.borrow_mut().push(limit);
             self.calls.borrow_mut().push(format!("{} {}", program.display(), args.join(" ")));
             self.script.borrow_mut().remove(0)
         }
     }
 
     fn out(code: i32, text: &str) -> Result<RunOutput, String> {
-        Ok(RunOutput { code: Some(code), text: text.to_owned() })
+        Ok(RunOutput { code: Some(code), text: text.to_owned(), timed_out: false })
     }
+
+    fn stopped(text: &str) -> Result<RunOutput, String> {
+        Ok(RunOutput { code: None, text: text.to_owned(), timed_out: true })
+    }
+
+    fn brew() -> Plan {
+        Plan::Brew(PathBuf::from(BREW))
+    }
+
+    const LIMIT: Duration = Duration::from_secs(600);
 
     const BREW: &str = "/opt/homebrew/bin/brew";
 
@@ -456,6 +596,18 @@ mod tests {
         let fake = Fake::new(vec![out(0, "binone")]);
         assert_eq!(plan(true, &|_| true, &fake), Plan::Brew(PathBuf::from(BREW)));
         assert_eq!(*fake.calls.borrow(), [format!("{BREW} list --cask binone")]);
+        assert_eq!(*fake.limits.borrow(), [Duration::from_secs(10)]);
+        assert_eq!(Plan::Brew(PathBuf::from(BREW)).method(), UpdateMethod::Brew);
+    }
+
+    #[test]
+    fn a_list_that_runs_out_of_time_is_not_the_cask() {
+        let fake = Fake::new(vec![stopped("")]);
+        assert_eq!(plan(true, &|_| true, &fake), Plan::Manual(ManualReason::NotInstalledByCask));
+        assert_eq!(
+            Plan::Manual(ManualReason::NoBrew).method(),
+            UpdateMethod::Manual { reason: ManualReason::NoBrew }
+        );
     }
 
     #[test]
@@ -480,7 +632,7 @@ mod tests {
     #[test]
     fn a_manual_plan_runs_nothing_and_gives_the_page_and_the_command() {
         let fake = Fake::new(vec![]);
-        let outcome = run_update(&Plan::Manual(ManualReason::NoBrew), &fake);
+        let outcome = run_update(&Plan::Manual(ManualReason::NoBrew), &fake, LIMIT);
         assert_eq!(outcome, UpdateOutcome::Manual { reason: ManualReason::NoBrew, command: MANUAL_COMMAND, url: RELEASES_PAGE_URL });
         assert!(fake.calls.borrow().is_empty());
         assert_eq!(MANUAL_COMMAND, "brew upgrade --cask binone");
@@ -491,9 +643,9 @@ mod tests {
     #[test]
     fn an_update_runs_both_steps_in_order() {
         let fake = Fake::new(vec![out(0, "Updated 1 tap"), out(0, "==> Upgrading binone\n🍺  binone was successfully upgraded!")]);
-        let outcome = run_update(&Plan::Brew(PathBuf::from(BREW)), &fake);
+        let outcome = run_update(&brew(), &fake, LIMIT);
         assert_eq!(*fake.calls.borrow(), [format!("{BREW} update"), format!("{BREW} upgrade --cask binone")]);
-        let UpdateOutcome::Finished { ok, code, step, output } = outcome else { panic!() };
+        let UpdateOutcome::Finished { ok, code, step, output, .. } = outcome else { panic!() };
         assert!(ok);
         assert_eq!(code, Some(0));
         assert_eq!(step, "brew upgrade --cask binone");
@@ -503,22 +655,50 @@ mod tests {
     #[test]
     fn a_failing_step_stops_the_update_with_its_code_and_output() {
         let fake = Fake::new(vec![out(1, "Error: could not update")]);
-        let outcome = run_update(&Plan::Brew(PathBuf::from(BREW)), &fake);
+        let outcome = run_update(&brew(), &fake, LIMIT);
         assert_eq!(fake.calls.borrow().len(), 1);
-        assert_eq!(outcome, UpdateOutcome::Finished { ok: false, code: Some(1), step: "brew update".into(), output: "Error: could not update".into() });
+        assert_eq!(outcome, UpdateOutcome::Finished { ok: false, code: Some(1), step: "brew update".into(), output: "Error: could not update".into(), timed_out: false });
 
         let fake = Fake::new(vec![out(0, ""), out(1, "Error: Cask 'binone' is not installed")]);
-        let UpdateOutcome::Finished { ok, code, step, .. } = run_update(&Plan::Brew(PathBuf::from(BREW)), &fake) else { panic!() };
+        let UpdateOutcome::Finished { ok, code, step, .. } = run_update(&brew(), &fake, LIMIT) else { panic!() };
         assert!(!ok);
         assert_eq!((code, step.as_str()), (Some(1), "brew upgrade --cask binone"));
 
-        let killed = Fake::new(vec![Ok(RunOutput { code: None, text: String::new() })]);
-        let UpdateOutcome::Finished { ok, code, .. } = run_update(&Plan::Brew(PathBuf::from(BREW)), &killed) else { panic!() };
+        let killed = Fake::new(vec![Ok(RunOutput { code: None, text: String::new(), timed_out: false })]);
+        let UpdateOutcome::Finished { ok, code, .. } = run_update(&brew(), &killed, LIMIT) else { panic!() };
         assert!(!ok && code.is_none());
 
         let missing = Fake::new(vec![Err("could not start brew: NotFound".into())]);
-        let UpdateOutcome::Finished { ok, output, .. } = run_update(&Plan::Brew(PathBuf::from(BREW)), &missing) else { panic!() };
+        let UpdateOutcome::Finished { ok, output, .. } = run_update(&brew(), &missing, LIMIT) else { panic!() };
         assert!(!ok && output.contains("NotFound"));
+    }
+
+    #[test]
+    fn a_step_out_of_time_ends_the_update_as_timed_out_with_the_output_so_far() {
+        let fake = Fake::new(vec![out(0, ""), stopped("==> Downloading\nstill going")]);
+        let outcome = run_update(&brew(), &fake, LIMIT);
+        let UpdateOutcome::Finished { ok, code, step, output, timed_out } = outcome else { panic!() };
+        assert!(!ok && timed_out && code.is_none());
+        assert_eq!(step, "brew upgrade --cask binone");
+        assert!(output.contains("still going"));
+        assert!(serde_json::to_string(&UpdateOutcome::Finished { ok, code, step, output, timed_out }).unwrap().contains(r#""timed_out":true"#));
+        // The first step too: nothing after it is run.
+        let fake = Fake::new(vec![stopped("x")]);
+        assert!(matches!(run_update(&brew(), &fake, LIMIT), UpdateOutcome::Finished { timed_out: true, .. }));
+        assert_eq!(fake.calls.borrow().len(), 1);
+    }
+
+    #[test]
+    fn the_steps_share_one_time_limit() {
+        let fake = Fake::new(vec![out(0, ""), out(0, "")]);
+        run_update(&brew(), &fake, LIMIT);
+        let limits = fake.limits.borrow();
+        assert!(limits[0] <= LIMIT && limits[0] > LIMIT - Duration::from_secs(5));
+        assert!(limits[1] <= limits[0]);
+        // A limit already used up leaves nothing for the next step.
+        let fake = Fake::new(vec![out(0, ""), out(0, "")]);
+        run_update(&brew(), &fake, Duration::ZERO);
+        assert_eq!(*fake.limits.borrow(), [Duration::ZERO, Duration::ZERO]);
     }
 
     #[test]
@@ -540,5 +720,70 @@ mod tests {
         assert!(gate.enter().is_none());
         drop(first);
         assert!(gate.enter().is_some());
+    }
+
+    #[test]
+    fn the_gate_is_open_again_however_the_update_ends() {
+        let gate = UpdateGate::default();
+        type Work = Box<dyn FnOnce() -> UpdateOutcome + Send>;
+        let ending: [(&str, Work); 4] = [
+            ("success", Box::new(|| run_update(&brew(), &Fake::new(vec![out(0, ""), out(0, "ok")]), LIMIT))),
+            ("failure", Box::new(|| run_update(&brew(), &Fake::new(vec![out(1, "Error")]), LIMIT))),
+            ("timeout", Box::new(|| run_update(&brew(), &Fake::new(vec![stopped("slow")]), LIMIT))),
+            ("panic", Box::new(|| panic!("the update panicked"))),
+        ];
+        for (name, work) in ending {
+            let answer = run(run_exclusive(&gate, work));
+            match name {
+                "panic" => assert!(answer.is_err(), "{answer:?}"),
+                "success" => assert!(matches!(answer, Ok(UpdateOutcome::Finished { ok: true, .. })), "{answer:?}"),
+                _ => assert!(matches!(answer, Ok(UpdateOutcome::Finished { ok: false, .. })), "{name}: {answer:?}"),
+            }
+            let again = gate.enter();
+            assert!(again.is_some(), "the gate stayed closed after {name}");
+        }
+    }
+
+    #[test]
+    fn a_second_update_is_refused_while_one_runs() {
+        let gate = UpdateGate::default();
+        let _running = gate.enter();
+        assert_eq!(run(run_exclusive(&gate, || panic!("must not run"))), Ok(UpdateOutcome::Busy));
+    }
+
+    #[cfg(unix)]
+    mod system {
+        use super::*;
+
+        fn sh(script: &str, limit: Duration) -> (Result<RunOutput, String>, Duration) {
+            let started = Instant::now();
+            let answer = SystemRunner.run(Path::new("/bin/sh"), &["-c", script], limit);
+            (answer, started.elapsed())
+        }
+
+        #[test]
+        fn a_program_that_finishes_gives_its_code_and_output() {
+            let (answer, _) = sh("echo out; echo err >&2; exit 3", Duration::from_secs(30));
+            let output = answer.unwrap();
+            assert_eq!(output.code, Some(3));
+            assert!(!output.timed_out);
+            assert!(output.text.contains("out") && output.text.contains("err"), "{:?}", output.text);
+        }
+
+        #[test]
+        fn a_program_past_its_limit_is_killed_and_what_it_wrote_is_kept() {
+            let (answer, took) = sh("echo before; exec sleep 60", Duration::from_millis(300));
+            let output = answer.unwrap();
+            assert!(output.timed_out);
+            assert_eq!(output.code, None);
+            assert!(output.text.contains("before"), "{:?}", output.text);
+            assert!(took < Duration::from_secs(20), "{took:?}");
+        }
+
+        #[test]
+        fn a_program_that_cannot_start_is_an_error() {
+            let answer = SystemRunner.run(Path::new("/nonexistent/brew"), &[], Duration::from_secs(1));
+            assert!(answer.unwrap_err().contains("could not start"));
+        }
     }
 }

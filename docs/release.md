@@ -37,18 +37,23 @@ shows as "確認できません" with the reason on the settings screen and does
 connection or the other screens. When a newer version exists, every screen's header shows
 "新しい版 X.Y.Z", which opens the version card of the settings screen.
 
-"更新" appears only when a newer version exists. It looks for Homebrew at
-`/opt/homebrew/bin/brew`, then `/usr/local/bin/brew` (not through `PATH`), checks that this app
-is an app bundle installed by the cask (`brew list --cask binone` succeeds), and then runs
-`brew update` and `brew upgrade --cask binone` as program-and-arguments, not through a shell. The
-screen shows it running, then the exit code and the end of the output on failure; a button
+How to update is found out with the check, only when a newer version exists. It looks for
+Homebrew at `/opt/homebrew/bin/brew`, then `/usr/local/bin/brew` (not through `PATH`), and checks
+that this app is an app bundle installed by the cask (`brew list --cask binone` succeeds; this is
+the only Homebrew call of a check, and it has a 10 second limit). With both, "更新" is shown; it
+runs `brew update` and `brew upgrade --cask binone` as program-and-arguments, not through a
+shell, within 10 minutes for the two together. A step that goes past the limit is killed and
+reaped; the screen says the update ran out of time and shows the end of the output so far, and
+"更新" can be pressed again. A failure shows the exit code and the end of the output; a button
 starts the app again after a success (it never restarts by itself). Without Homebrew, or for an
-app that the cask did not install (a development build), nothing is run: the screen offers the
-release page in the default browser and the command `brew upgrade --cask binone`. The update
-does not touch the app's data directory, so the saved address and key stay.
+app that the cask did not install (a development build), "更新" is not shown and nothing is run:
+the screen offers, as soon as the newer version is known, the release page in the default
+browser and the command `brew upgrade --cask binone`. The update does not touch the app's data
+directory, so the saved address and key stay.
 
-With `NUXT_PUBLIC_SAMPLE_DATA=1` the three states can be drawn with `?sample-update=latest`,
-`?sample-update=available` and `?sample-update=unknown`.
+With `NUXT_PUBLIC_SAMPLE_DATA=1` the states can be drawn with `?sample-update=latest`,
+`?sample-update=available` (update by Homebrew), `?sample-update=manual` (newer, by hand) and
+`?sample-update=unknown`.
 
 ## Release
 

@@ -39,16 +39,17 @@ export interface SampleOptions {
   /** Every operation but `serverInfo` fails with this kind (to see the failure screens). */
   failWith?: ApiErrorKind;
   now?: number;
-  /** What the version check finds (`?sample-update=latest|available|unknown`). */
+  /** What the version check finds (`?sample-update=latest|available|manual|unknown`). */
   update?: SampleUpdate;
 }
 
-export type SampleUpdate = "latest" | "available" | "unknown";
-export const SAMPLE_UPDATES: readonly SampleUpdate[] = ["latest", "available", "unknown"];
+export type SampleUpdate = "latest" | "available" | "manual" | "unknown";
+export const SAMPLE_UPDATES: readonly SampleUpdate[] = ["latest", "available", "manual", "unknown"];
 
 function sampleCheck(kind: SampleUpdate): UpdateCheck {
   const current = "0.2.0";
-  if (kind === "available") return { state: "available", current, latest: "0.3.0" };
+  if (kind === "available") return { state: "available", current, latest: "0.3.0", method: { kind: "brew" } };
+  if (kind === "manual") return { state: "available", current, latest: "0.3.0", method: { kind: "manual", reason: "no_brew" } };
   if (kind === "unknown") return { state: "unknown", current, reason: "GitHub refused the request (rate limit?): HTTP 403" };
   return { state: "up_to_date", current, latest: current };
 }

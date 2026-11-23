@@ -49,28 +49,28 @@ const showPage = computed(() => connected.value !== null || route.path === "/con
         </nav>
       </div>
       <div class="flex min-w-0 shrink items-center gap-3">
-      <NuxtLink
-        v-if="updateBadge"
-        :to="{ path: '/settings', hash: '#version' }"
-        class="shrink-0 rounded-md border border-primary/40 bg-primary/10 px-2 py-1 text-xs text-primary transition-colors hover:bg-primary/20"
-        data-testid="update-badge"
-        title="設定の画面の版の欄を開く"
-      >
-        {{ updateBadge }}
-      </NuxtLink>
-      <NuxtLink
-        to="/connect"
-        class="flex min-w-0 shrink items-center gap-2 rounded-md border border-default px-3 py-1.5 text-xs text-muted transition-colors hover:bg-elevated hover:text-default"
-        data-testid="connection-link"
-        title="接続の画面を開く"
-      >
-        <span class="size-2 shrink-0 rounded-full" :class="connected ? 'bg-success' : 'bg-muted'" />
-        <template v-if="connected">
-          <span class="truncate font-mono" data-testid="header-address">{{ address(connected.host, connected.port) }}</span>
-          <span class="shrink-0 font-mono" data-testid="header-version">v{{ connected.version }}</span>
-        </template>
-        <span v-else class="shrink-0">未接続</span>
-      </NuxtLink>
+        <NuxtLink
+          v-if="updateBadge"
+          :to="{ path: '/settings', hash: '#version' }"
+          class="shrink-0 rounded-md border border-primary/40 bg-primary/10 px-2 py-1 text-xs text-primary transition-colors hover:bg-primary/20"
+          data-testid="update-badge"
+          title="設定の画面の版の欄を開く"
+        >
+          {{ updateBadge }}
+        </NuxtLink>
+        <NuxtLink
+          to="/connect"
+          class="flex min-w-0 shrink items-center gap-2 rounded-md border border-default px-3 py-1.5 text-xs text-muted transition-colors hover:bg-elevated hover:text-default"
+          data-testid="connection-link"
+          title="接続の画面を開く"
+        >
+          <span class="size-2 shrink-0 rounded-full" :class="connected ? 'bg-success' : 'bg-muted'" />
+          <template v-if="connected">
+            <span class="truncate font-mono" data-testid="header-address">{{ address(connected.host, connected.port) }}</span>
+            <span class="shrink-0 font-mono" data-testid="header-version">v{{ connected.version }}</span>
+          </template>
+          <span v-else class="shrink-0">未接続</span>
+        </NuxtLink>
       </div>
     </header>
 

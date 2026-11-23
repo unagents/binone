@@ -1,6 +1,6 @@
 // Draws the app with sample data where there is no Tauri (a headless browser). Off unless the
 // build was made with NUXT_PUBLIC_SAMPLE_DATA=1; `?sample-fail=<kind>` makes every call fail;
-// `?sample-update=latest|available|unknown` sets what the version check finds.
+// `?sample-update=latest|available|manual|unknown` sets what the version check finds.
 import { API_ERROR_KINDS, type ApiErrorKind } from "~/utils/api/errors";
 import { setNativeCall } from "~/utils/api/transport";
 

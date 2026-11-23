@@ -2,13 +2,14 @@
 import type { ApiError } from "~/utils/api/errors";
 import { toApiError } from "~/utils/api/errors";
 import type { LaneDef, SettingsView } from "~/types/binone";
-import { MANUAL_COMMAND, finishedText, manualReasonText, statusText } from "~/utils/update";
+import { MANUAL_COMMAND, canRunUpdate, finishedText, manualReason, manualReasonText, statusText } from "~/utils/update";
 import { canMoveLane, isStandardLane, laneLabel, moveItem, validateKind, validateLaneName } from "~/utils/settings";
 
 const { check, checking, outcome, updating, actionError, runCheck, update, restart, openReleasePage } = useUpdate();
 const finished = computed(() => (outcome.value?.state === "finished" ? outcome.value : null));
-const updated = computed(() => finished.value?.ok === true);
-const canUpdate = computed(() => check.value?.state === "available" && !updated.value);
+const canUpdate = computed(() => canRunUpdate(check.value, outcome.value));
+// Known from the check, so the way by hand is shown before "更新" is pressed (and in its place).
+const manual = computed(() => manualReason(check.value, outcome.value));
 
 const api = useApi();
 const { data, error, loading, reload } = useScreenData(() => api.settings());
@@ -97,21 +98,21 @@ async function save() {
 
       <div v-if="canUpdate" class="mt-3 flex items-center gap-3">
         <UButton size="sm" :loading="updating" :disabled="updating" data-testid="run-update" @click="update">更新</UButton>
-        <span v-if="updating" class="text-xs text-muted" data-testid="update-progress">更新しています（brew update、brew upgrade）。そのままお待ちください。</span>
+        <span v-if="updating" class="text-xs text-muted" data-testid="update-progress">更新しています（brew update、brew upgrade）。そのままお待ちください（最長 10 分）。</span>
       </div>
 
-      <div v-if="outcome?.state === 'manual'" class="mt-3 space-y-2 text-sm" data-testid="update-manual">
-        <p class="text-muted">{{ manualReasonText(outcome.reason) }}</p>
+      <div v-if="manual" class="mt-3 space-y-2 text-sm" data-testid="update-manual">
+        <p class="text-muted">{{ manualReasonText(manual) }}</p>
         <div class="flex flex-wrap items-center gap-3">
           <UButton size="sm" color="neutral" variant="outline" data-testid="open-release" @click="openReleasePage">リリースのページを開く</UButton>
           <span class="text-xs text-muted">または、Homebrew で入れた Mac で次を実行:</span>
           <code class="rounded-md bg-muted px-2 py-1 font-mono text-xs" data-testid="manual-command">{{ MANUAL_COMMAND }}</code>
         </div>
       </div>
-      <p v-else-if="outcome?.state === 'busy'" class="mt-3 text-xs text-muted">別の更新が動いています。</p>
+      <p v-if="outcome?.state === 'busy'" class="mt-3 text-xs text-muted">別の更新が動いています。</p>
 
       <div v-if="finished" class="mt-3 space-y-2" data-testid="update-result" :data-ok="finished.ok">
-        <p class="text-sm" :class="finished.ok ? 'text-success' : 'text-error'">{{ finishedText(finished) }}</p>
+        <p class="text-sm" :class="finished.ok ? 'text-success' : 'text-error'" :data-timed-out="finished.timed_out">{{ finishedText(finished) }}</p>
         <pre v-if="finished.output" class="max-h-48 overflow-auto rounded-md bg-muted p-2 font-mono text-xs whitespace-pre-wrap" data-testid="update-output">{{ finished.output }}</pre>
         <UButton v-if="finished.ok" size="sm" data-testid="restart-app" @click="restart">再起動</UButton>
       </div>
