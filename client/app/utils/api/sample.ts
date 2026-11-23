@@ -50,7 +50,7 @@ function sampleCheck(kind: SampleUpdate): UpdateCheck {
   const current = "0.2.0";
   if (kind === "available") return { state: "available", current, latest: "0.3.0", method: { kind: "brew" } };
   if (kind === "manual") return { state: "available", current, latest: "0.3.0", method: { kind: "manual", reason: "no_brew" } };
-  if (kind === "unknown") return { state: "unknown", current, reason: "GitHub refused the request (rate limit?): HTTP 403" };
+  if (kind === "unknown") return { state: "unknown", current, reason: "GitHub に断られました（回数の上限の可能性があります。HTTP 403）" };
   return { state: "up_to_date", current, latest: current };
 }
 
@@ -201,6 +201,10 @@ export function createSampleServer(options: SampleOptions = {}): NativeCall {
       case "check_update":
         return sampleCheck(options.update ?? "latest");
       case "run_update":
+        // With Homebrew in the sample (`available`), an update that went through but could not refresh the tap.
+        if (options.update === "available") {
+          return { state: "finished", ok: true, code: 0, step: "brew upgrade --cask binone", output: "==> Upgrading 1 outdated package\nbinone 0.2.0 -> 0.3.0", timed_out: false, note: "tap unagents/tap は更新できませんでした（git pull が終了 code 1 で失敗しました）。" } satisfies UpdateOutcome;
+        }
         // Without Homebrew in the sample, the screen shows the manual way.
         return { state: "manual", reason: "no_brew", command: MANUAL_COMMAND, url: "https://github.com/unagents/binone/releases/latest" } satisfies UpdateOutcome;
       case "restart_app":

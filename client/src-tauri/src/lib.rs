@@ -119,13 +119,14 @@ async fn api_call(
     gateway.call(&settings, &op, args).await
 }
 
-fn is_bundled() -> bool {
-    std::env::current_exe().is_ok_and(|exe| update::is_app_bundle(&exe))
+/// The `.app` bundle this program runs from, if it does.
+fn app_bundle() -> Option<std::path::PathBuf> {
+    std::env::current_exe().ok().and_then(|exe| update::app_bundle(&exe))
 }
 
-/// How an update would be done from here: Homebrew, or by hand. Runs `brew list` at most once.
+/// How an update would be done from here: Homebrew, or by hand. Runs `brew list` once per brew found.
 fn detect_plan() -> update::Plan {
-    update::plan(is_bundled(), &|path| path.is_file(), &update::SystemRunner, update::LIST_TIME_LIMIT)
+    update::plan(app_bundle().as_deref(), &|path| path.is_file(), &update::SystemRunner, update::LIST_TIME_LIMIT)
 }
 
 /// The version check: the running version against the latest published release, and (only when
@@ -142,10 +143,15 @@ async fn check_update(app: AppHandle) -> update::UpdateCheck {
 }
 
 /// The update through Homebrew, or `manual` when it cannot be run from here (no Homebrew, or
-/// this app was not installed by the cask). One at a time, and within a time limit.
+/// this app was not installed by the cask). `latest` is the version the check found: the update
+/// counts as done only when that version is the one installed afterwards. One at a time, and
+/// within a time limit.
 #[tauri::command]
-async fn run_update(gate: State<'_, update::UpdateGate>) -> Result<update::UpdateOutcome, String> {
-    update::run_exclusive(&gate, || update::detect_and_update(is_bundled(), &|path| path.is_file(), &update::SystemRunner, update::UPDATE_TIME_LIMIT)).await
+async fn run_update(gate: State<'_, update::UpdateGate>, latest: String) -> Result<update::UpdateOutcome, String> {
+    update::run_exclusive(&gate, move || {
+        update::detect_and_update(app_bundle().as_deref(), &latest, &|path| path.is_file(), &update::SystemRunner, update::UPDATE_TIME_LIMIT)
+    })
+    .await
 }
 
 /// Starts the app again (after an update the new version starts).
@@ -163,7 +169,7 @@ fn open_release_page() -> Result<(), String> {
         .arg(update::RELEASES_PAGE_URL)
         .spawn()
         .map(drop)
-        .map_err(|e| format!("could not open the browser: {}", e.kind()))
+        .map_err(|e| format!("ブラウザを開けませんでした（{}）", e.kind()))
 }
 
 pub fn run() {

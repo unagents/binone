@@ -98,7 +98,7 @@ async function save() {
 
       <div v-if="canUpdate" class="mt-3 flex items-center gap-3">
         <UButton size="sm" :loading="updating" :disabled="updating" data-testid="run-update" @click="update">更新</UButton>
-        <span v-if="updating" class="text-xs text-muted" data-testid="update-progress">更新しています（brew update、brew upgrade）。そのままお待ちください（最長 10 分）。</span>
+        <span v-if="updating" class="text-xs text-muted" data-testid="update-progress">更新しています（tap の更新、brew upgrade、版の確認）。そのままお待ちください（最長 10 分）。</span>
       </div>
 
       <div v-if="manual" class="mt-3 space-y-2 text-sm" data-testid="update-manual">

@@ -33,21 +33,30 @@ client's repository, once after startup and when "確認" on the settings screen
 is no periodic check. The tag, without its leading `v`, is compared with the running version as
 three numbers (`0.10.0` is newer than `0.9.0`). Drafts, prereleases and tags that are not a plain
 `X.Y.Z` are not candidates. A failure (no network, rate limit, an answer of another shape)
-shows as "確認できません" with the reason on the settings screen and does not affect the
-connection or the other screens. When a newer version exists, every screen's header shows
-"新しい版 X.Y.Z", which opens the version card of the settings screen.
+shows as "確認できません" with the reason on the settings screen, in Japanese and by kind (not
+reachable, refused with the HTTP status, no release, an answer of another shape, other), and does
+not affect the connection or the other screens. When a newer version exists, every screen's header
+shows "新しい版 X.Y.Z", which opens the version card of the settings screen.
 
 How to update is found out with the check, only when a newer version exists. It looks for
-Homebrew at `/opt/homebrew/bin/brew`, then `/usr/local/bin/brew` (not through `PATH`), and checks
-that this app is an app bundle installed by the cask (`brew list --cask binone` succeeds; this is
-the only Homebrew call of a check, and it has a 10 second limit). With both, "更新" is shown; it
-runs `brew update` and `brew upgrade --cask binone` as program-and-arguments, not through a
-shell. The whole update, the judgment above included, has 10 minutes in all. When it runs out of
-time everything it started is stopped with it, child processes too (the whole process group: TERM
-first, then KILL after a short grace), and reaped; the screen says the update ran out of time and
-shows the end of the output so far, and "更新" can be pressed again. A failure shows the exit code
-and the end of the output; a button starts the app again after a success (it never restarts by
-itself). Without Homebrew, or for an app that the cask did not install (a development build), "更新"
+Homebrew at `/opt/homebrew/bin/brew` and `/usr/local/bin/brew` (not through `PATH`), and asks each
+one that exists whether it has the cask (`brew list --cask binone` succeeds, with a 10 second
+limit for each call), for an app that is an app bundle. When both have it, the one whose list names
+the running app's bundle is used, and `/opt/homebrew` when that cannot be told. With one, "更新" is
+shown. The update runs these, as program-and-arguments and not through a shell: the tap's
+directory (`brew --repo unagents/tap`) and `git pull --ff-only` in it, so that only that tap is
+refreshed (not `brew update`, which refreshes every tap); then `brew upgrade --cask binone` with
+`HOMEBREW_NO_AUTO_UPDATE=1`; then `brew list --cask --versions binone`. The update counts as done
+only when the installed version is the latest one the check found: when it is not (brew ended with
+code 0 and did nothing) the screen says it was not updated, with both versions, and when the
+installed version cannot be read it says that this could not be confirmed. A tap that cannot be
+refreshed does not stop the update; the screen says so after the result. The whole update, the
+judgment above included, has 10 minutes in all. When it runs out of time everything it started is
+stopped with it, child processes too (the whole process group: TERM first, then KILL after a short
+grace), and reaped; the screen says the update ran out of time and shows the end of the output so
+far, and "更新" can be pressed again. A failure shows the exit code and the end of the output; a
+button starts the app again after a success (it never restarts by itself). Without Homebrew, or for
+an app that the cask did not install (a development build, or a cask in neither Homebrew), "更新"
 is not shown and nothing is run: the screen offers, as soon as the newer version is known, the
 release page in the default browser and the command `brew upgrade --cask binone`. The update does
 not touch the app's data directory, so the saved address and key stay.

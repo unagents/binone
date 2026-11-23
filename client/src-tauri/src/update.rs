@@ -1,9 +1,9 @@
 //! Checking for a newer client and updating it through Homebrew.
 //!
 //! Both happen on this side: the webview never reaches GitHub and never starts a program. The
-//! latest release is read from GitHub's public API without credentials; the update runs
-//! `brew update` and `brew upgrade --cask binone` with the program and its arguments given
-//! separately (no shell). Nothing here touches the app's data directory, where the connection
+//! latest release is read from GitHub's public API without credentials; the update refreshes the
+//! tap `unagents/tap` with git, runs `brew upgrade --cask binone` and then reads the installed
+//! version back, with each program and its arguments given separately (no shell). Nothing here touches the app's data directory, where the connection
 //! settings and the key are kept.
 //!
 //! What touches the outside (the HTTP answer, running a program, the file system) is passed in
@@ -26,13 +26,19 @@ pub const RELEASES_PAGE_URL: &str = "https://github.com/unagents/binone/releases
 pub const MANUAL_COMMAND: &str = "brew upgrade --cask binone";
 
 const CASK: &str = "binone";
-/// Looked for in this order; `PATH` is not consulted (an app started from Finder has a short one).
+/// The tap that holds the cask: only this one is refreshed (not every tap, as `brew update` would).
+const TAP: &str = "unagents/tap";
+const GIT: &str = "/usr/bin/git";
+/// Set for the upgrade: the tap was refreshed above, and an automatic update of every tap is what failed on a user's Mac.
+const UPGRADE_ARGS: [&str; 3] = ["upgrade", "--cask", CASK];
+const UPGRADE_ENV: [(&str, &str); 1] = [("HOMEBREW_NO_AUTO_UPDATE", "1")];
+/// Looked for in this order (the first is preferred when both have the cask); `PATH` is not consulted (an app started from Finder has a short one).
 const BREW_CANDIDATES: [&str; 2] = ["/opt/homebrew/bin/brew", "/usr/local/bin/brew"];
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
-/// The whole update (`brew update` and `brew upgrade`) may take this long.
+/// The whole update (the choice of brew, the tap, the upgrade and the check of the result) may take this long.
 pub const UPDATE_TIME_LIMIT: Duration = Duration::from_secs(10 * 60);
-/// The one brew call made to find out how to update (`brew list --cask binone`).
+/// Each brew call made to find out how to update (`brew list --cask binone`, once per brew).
 pub const LIST_TIME_LIMIT: Duration = Duration::from_secs(10);
 /// After a time-out: how long the program gets to end on TERM before the whole group is killed.
 const TERM_GRACE: Duration = Duration::from_millis(500);
@@ -76,9 +82,32 @@ impl std::fmt::Display for Version {
 // ---------------------------------------------------------------------------------------------
 // Checking
 
-/// Why the latest version could not be found out. The text is shown to the user.
+/// Why the latest version could not be found out, by kind. `text()` is the sentence shown to the user.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CheckFailure(pub String);
+pub enum CheckFailure {
+    /// GitHub could not be reached (the detail says how).
+    Network(&'static str),
+    /// GitHub refused (a rate limit is the usual cause); carries the HTTP status.
+    Refused(u16),
+    /// No release has been published (404).
+    NoRelease,
+    /// The answer does not have the expected shape (the detail says what is wrong).
+    Shape(String),
+    /// Anything else, with its own words.
+    Other(String),
+}
+
+impl CheckFailure {
+    pub fn text(&self) -> String {
+        match self {
+            CheckFailure::Network(detail) => format!("GitHub に届きません（{detail}）"),
+            CheckFailure::Refused(status) => format!("GitHub に断られました（回数の上限の可能性があります。HTTP {status}）"),
+            CheckFailure::NoRelease => "公開された release がありません（HTTP 404）".to_owned(),
+            CheckFailure::Shape(detail) => format!("GitHub の応答の形が想定と違います（{detail}）"),
+            CheckFailure::Other(detail) => format!("確認できませんでした（{detail}）"),
+        }
+    }
+}
 
 /// What the check found. `Unknown` carries the reason; the screens stay usable in every case.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -109,26 +138,26 @@ pub struct HttpAnswer {
 
 /// The version of the release in GitHub's answer for "latest release".
 pub fn interpret_release(answer: &HttpAnswer) -> Result<Version, CheckFailure> {
-    let fail = |text: String| Err(CheckFailure(text));
     match answer.status {
         200 => {}
-        403 | 429 => return fail(format!("GitHub refused the request (rate limit?): HTTP {}", answer.status)),
-        404 => return fail("no release has been published".to_owned()),
-        status => return fail(format!("GitHub answered HTTP {status}")),
+        status @ (403 | 429) => return Err(CheckFailure::Refused(status)),
+        404 => return Err(CheckFailure::NoRelease),
+        status => return Err(CheckFailure::Other(format!("GitHub が HTTP {status} を返しました"))),
     }
+    let shape = |text: &str| Err(CheckFailure::Shape(text.to_owned()));
     let Ok(value) = serde_json::from_str::<serde_json::Value>(&answer.body) else {
-        return fail("the answer is not JSON".to_owned());
+        return shape("JSON ではありません");
     };
     let flag = |name: &str| value.get(name).and_then(|v| v.as_bool()).unwrap_or(false);
     if flag("draft") || flag("prerelease") {
-        return fail("the latest release is a draft or a prerelease".to_owned());
+        return shape("最新の release が下書きか先行版です");
     }
     let Some(tag) = value.get("tag_name").and_then(|v| v.as_str()) else {
-        return fail("the answer has no tag_name".to_owned());
+        return shape("tag_name がありません");
     };
     match Version::parse(tag) {
         Some(version) => Ok(version),
-        None => fail(format!("the tag \"{}\" is not a version", tag.chars().take(40).collect::<String>())),
+        None => shape(&format!("tag「{}」は版ではありません", tag.chars().take(40).collect::<String>())),
     }
 }
 
@@ -144,11 +173,11 @@ where
 {
     let unknown = |reason: String| UpdateCheck::Unknown { current: current.to_owned(), reason };
     let Some(running) = Version::parse(current) else {
-        return unknown(format!("this app's version \"{current}\" is not a plain version"));
+        return unknown(CheckFailure::Other(format!("このアプリの版「{current}」は a.b.c の形ではありません")).text());
     };
     let latest = match fetch().await.and_then(|answer| interpret_release(&answer)) {
         Ok(latest) => latest,
-        Err(CheckFailure(reason)) => return unknown(reason),
+        Err(failure) => return unknown(failure.text()),
     };
     let (current, latest) = (running.to_string(), latest.to_string());
     if Version::parse(&latest) > Some(running) {
@@ -168,18 +197,15 @@ pub async fn fetch_latest() -> Result<HttpAnswer, CheckFailure> {
         .redirect(reqwest::redirect::Policy::limited(3))
         .user_agent("binone-client")
         .build()
-        .map_err(|_| CheckFailure("the HTTP client could not be prepared".to_owned()))?;
+        .map_err(|_| CheckFailure::Other("HTTP の用意ができませんでした".to_owned()))?;
     let failure = |e: &reqwest::Error| {
-        CheckFailure(
-            if e.is_timeout() {
-                "GitHub did not answer in time"
-            } else if e.is_connect() {
-                "could not connect to GitHub"
-            } else {
-                "the request to GitHub failed"
-            }
-            .to_owned(),
-        )
+        CheckFailure::Network(if e.is_timeout() {
+            "時間切れです"
+        } else if e.is_connect() {
+            "接続できません"
+        } else {
+            "要求に失敗しました"
+        })
     };
     let response = client
         .get(LATEST_RELEASE_URL)
@@ -205,10 +231,11 @@ pub struct RunOutput {
     pub timed_out: bool,
 }
 
-/// Runs a program with its arguments (never through a shell). A program that is still running
-/// after `limit` is killed and reaped, and the answer says so.
+/// Runs a program with its arguments (never through a shell), with `env` added to the
+/// environment it inherits. A program that is still running after `limit` is killed and reaped,
+/// and the answer says so.
 pub trait Runner {
-    fn run(&self, program: &Path, args: &[&str], limit: Duration) -> Result<RunOutput, String>;
+    fn run(&self, program: &Path, args: &[&str], env: &[(&str, &str)], limit: Duration) -> Result<RunOutput, String>;
 }
 
 pub struct SystemRunner;
@@ -278,11 +305,11 @@ fn stop_group(child: &mut std::process::Child) {
 }
 
 impl Runner for SystemRunner {
-    fn run(&self, program: &Path, args: &[&str], limit: Duration) -> Result<RunOutput, String> {
+    fn run(&self, program: &Path, args: &[&str], env: &[(&str, &str)], limit: Duration) -> Result<RunOutput, String> {
         use std::process::Stdio;
-        let started = |e: std::io::Error| format!("could not start {}: {}", program.display(), e.kind());
+        let started = |e: std::io::Error| format!("{} を起動できませんでした（{}）", program.display(), e.kind());
         let mut command = std::process::Command::new(program);
-        command.args(args).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+        command.args(args).envs(env.iter().copied()).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
         #[cfg(unix)]
         std::os::unix::process::CommandExt::process_group(&mut command, 0);
         let mut child = command.spawn().map_err(started)?;
@@ -299,7 +326,7 @@ impl Runner for SystemRunner {
                 Ok(None) => std::thread::sleep(Duration::from_millis(20)),
                 Err(e) => {
                     stop_group(&mut child);
-                    return Err(format!("could not wait for {}: {}", program.display(), e.kind()));
+                    return Err(format!("{} の終わりを待てませんでした（{}）", program.display(), e.kind()));
                 }
             }
         };
@@ -312,21 +339,16 @@ impl Runner for SystemRunner {
     }
 }
 
-/// The first of the usual places that has a brew.
-pub fn find_brew(exists: &dyn Fn(&Path) -> bool) -> Option<PathBuf> {
-    BREW_CANDIDATES.iter().map(PathBuf::from).find(|path| exists(path))
+/// The usual places that have a brew, in the order of preference.
+pub fn find_brews(exists: &dyn Fn(&Path) -> bool) -> Vec<PathBuf> {
+    BREW_CANDIDATES.iter().map(PathBuf::from).filter(|path| exists(path)).collect()
 }
 
-/// The arguments of each brew command of an update, in the order they are run.
-pub fn update_steps() -> [Vec<&'static str>; 2] {
-    [vec!["update"], vec!["upgrade", "--cask", CASK]]
-}
-
-/// Whether the running executable is inside an `.app` bundle (a development build is not).
-pub fn is_app_bundle(exe: &Path) -> bool {
-    exe.ancestors().any(|dir| {
-        dir.extension().is_some_and(|e| e == "app") && exe.strip_prefix(dir).is_ok_and(|rest| rest.starts_with("Contents/MacOS"))
-    })
+/// The `.app` bundle that the running executable is inside (a development build has none).
+pub fn app_bundle(exe: &Path) -> Option<PathBuf> {
+    exe.ancestors()
+        .find(|dir| dir.extension().is_some_and(|e| e == "app") && exe.strip_prefix(dir).is_ok_and(|rest| rest.starts_with("Contents/MacOS")))
+        .map(Path::to_path_buf)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -344,20 +366,37 @@ pub enum Plan {
     Manual(ManualReason),
 }
 
-/// Whether the update can be run with Homebrew: there is a brew, this app is an app bundle, and
-/// the cask `binone` is installed.
-/// `list_limit` caps the one Homebrew call made (`brew list`).
-pub fn plan(bundled: bool, exists: &dyn Fn(&Path) -> bool, runner: &dyn Runner, list_limit: Duration) -> Plan {
-    let Some(brew) = find_brew(exists) else {
+/// Whether a line of `brew list` names `bundle` itself (not a longer name that begins with it).
+fn names_bundle(line: &str, bundle: &str) -> bool {
+    line.trim().strip_prefix(bundle).is_some_and(|rest| rest.is_empty() || rest.starts_with([' ', '/']))
+}
+
+/// Whether the update can be run with Homebrew, and with which one. Each brew that exists is
+/// asked `brew list --cask binone` (at most `list_limit` each); those where it succeeds have the
+/// cask. With the cask in both, the one whose list names the running app's bundle is used (the
+/// first of the usual places when that cannot be told). A development build (`bundle` is `None`)
+/// is not the cask's app, and nothing is asked.
+pub fn plan(bundle: Option<&Path>, exists: &dyn Fn(&Path) -> bool, runner: &dyn Runner, list_limit: Duration) -> Plan {
+    let brews = find_brews(exists);
+    if brews.is_empty() {
         return Plan::Manual(ManualReason::NoBrew);
-    };
-    let installed = bundled
-        && matches!(runner.run(&brew, &["list", "--cask", CASK], list_limit), Ok(RunOutput { code: Some(0), timed_out: false, .. }));
-    if installed {
-        Plan::Brew(brew)
-    } else {
-        Plan::Manual(ManualReason::NotInstalledByCask)
     }
+    let Some(bundle) = bundle else {
+        return Plan::Manual(ManualReason::NotInstalledByCask);
+    };
+    let bundle = bundle.to_string_lossy();
+    let mut chosen: Option<PathBuf> = None;
+    for brew in brews {
+        let Ok(RunOutput { code: Some(0), timed_out: false, text }) = runner.run(&brew, &["list", "--cask", CASK], &[], list_limit) else {
+            continue;
+        };
+        // `brew list --cask` prints the paths of what the cask installed, the app among them.
+        if text.lines().any(|line| names_bundle(line, &bundle)) {
+            return Plan::Brew(brew);
+        }
+        chosen.get_or_insert(brew);
+    }
+    chosen.map_or(Plan::Manual(ManualReason::NotInstalledByCask), Plan::Brew)
 }
 
 impl Plan {
@@ -380,7 +419,8 @@ pub enum UpdateOutcome {
     Busy,
     /// Run to the end or to the first failing step. `output` is the end of its output.
     /// `timed_out`: the step did not end within the time limit and was killed.
-    Finished { ok: bool, code: Option<i32>, step: String, output: String, timed_out: bool },
+    /// `note`: something that went wrong on the way without stopping the update (the tap).
+    Finished { ok: bool, code: Option<i32>, step: String, output: String, timed_out: bool, note: Option<String> },
 }
 
 /// The last lines of `text`, limited in size.
@@ -391,35 +431,102 @@ pub fn tail(text: &str) -> String {
     joined.chars().skip(skip).collect()
 }
 
-/// Runs the update as planned. `limit` is for the whole update: each step gets what is left of
-/// it, and a step that goes past it is killed.
-pub fn run_update(plan: &Plan, runner: &dyn Runner, limit: Duration) -> UpdateOutcome {
+/// The last non-empty line of a program's text (what `brew --repo` prints is one path).
+fn last_line(text: &str) -> Option<&str> {
+    text.lines().map(str::trim).rfind(|line| !line.is_empty())
+}
+
+/// Refreshes the tap with git: `brew --repo unagents/tap` for its directory, then `git pull
+/// --ff-only` in it. It never stops the update; what went wrong is returned as a sentence.
+fn refresh_tap(brew: &Path, runner: &dyn Runner, deadline: Instant) -> Option<String> {
+    let left = || deadline.saturating_duration_since(Instant::now());
+    let why = |reason: String| Some(format!("tap {TAP} は更新できませんでした（{reason}）。"));
+    let dir = match runner.run(brew, &["--repo", TAP], &[], left()) {
+        Ok(RunOutput { code: Some(0), timed_out: false, text }) => last_line(&text).map(str::to_owned),
+        Ok(RunOutput { timed_out: true, .. }) => return why("tap の場所を調べている間に時間切れになりました".into()),
+        Ok(_) => None,
+        Err(text) => return why(text),
+    };
+    let Some(dir) = dir else {
+        return why("tap の場所が分かりません".into());
+    };
+    match runner.run(Path::new(GIT), &["-C", &dir, "pull", "--ff-only"], &[], left()) {
+        Ok(RunOutput { code: Some(0), timed_out: false, .. }) => None,
+        Ok(RunOutput { timed_out: true, .. }) => why("git pull が時間切れになりました".into()),
+        Ok(RunOutput { code, .. }) => why(match code {
+            Some(code) => format!("git pull が終了 code {code} で失敗しました"),
+            None => "git pull が途中で止まりました".to_owned(),
+        }),
+        Err(text) => why(text),
+    }
+}
+
+/// The versions `brew list --cask --versions binone` printed (`binone 0.3.0`), when it printed any.
+fn installed_versions(text: &str) -> Vec<Version> {
+    let Some(line) = text.lines().map(str::trim).find(|line| line.split_whitespace().next() == Some(CASK)) else {
+        return Vec::new();
+    };
+    line.split_whitespace().skip(1).filter_map(Version::parse).collect()
+}
+
+/// Runs the update as planned: the tap, the upgrade (with no automatic update of every tap), and
+/// then a look at the installed version, which has to be `latest` for the update to count as done
+/// (brew ends with code 0 when it did nothing). `limit` is for the whole update: each step gets
+/// what is left of it, and a step that goes past it is killed.
+pub fn run_update(plan: &Plan, latest: &str, runner: &dyn Runner, limit: Duration) -> UpdateOutcome {
     let brew = match plan {
         Plan::Manual(reason) => return UpdateOutcome::Manual { reason: *reason, command: MANUAL_COMMAND, url: RELEASES_PAGE_URL },
         Plan::Brew(brew) => brew,
     };
     let deadline = Instant::now() + limit;
-    let mut last = UpdateOutcome::Busy;
-    for args in update_steps() {
-        let step = format!("brew {}", args.join(" "));
-        let left = deadline.saturating_duration_since(Instant::now());
-        last = match runner.run(brew, &args, left) {
-            Err(text) => return UpdateOutcome::Finished { ok: false, code: None, step, output: text, timed_out: false },
-            Ok(RunOutput { code, text, timed_out }) if timed_out || code != Some(0) => {
-                return UpdateOutcome::Finished { ok: false, code, step, output: tail(&text), timed_out }
+    let left = || deadline.saturating_duration_since(Instant::now());
+    let note = refresh_tap(brew, runner, deadline);
+
+    let step = format!("brew {}", UPGRADE_ARGS.join(" "));
+    let finished = |ok, code, output: String, timed_out| UpdateOutcome::Finished { ok, code, step: step.clone(), output, timed_out, note: note.clone() };
+    let (code, text) = match runner.run(brew, &UPGRADE_ARGS, &UPGRADE_ENV, left()) {
+        Err(text) => return finished(false, None, text, false),
+        Ok(RunOutput { code, text, timed_out }) if timed_out || code != Some(0) => return finished(false, code, tail(&text), timed_out),
+        Ok(RunOutput { code, text, .. }) => (code, text),
+    };
+
+    let latest = Version::parse(latest);
+    let shown = latest.map_or_else(|| "不明".to_owned(), |v| v.to_string());
+    let verdict = match runner.run(brew, &["list", "--cask", "--versions", CASK], &[], left()) {
+        Ok(RunOutput { code: Some(0), timed_out: false, text }) => {
+            let versions = installed_versions(&text);
+            match (latest, versions.as_slice()) {
+                (Some(latest), versions) if versions.contains(&latest) => None,
+                (_, []) => Some(format!("更新できたか確認できませんでした（入っている版を読めません、最新 {shown}）")),
+                (None, _) => Some(format!("更新できたか確認できませんでした（最新の版が分かりません、入っている版 {}）", join_versions(&versions))),
+                (Some(_), versions) => Some(format!("更新されませんでした（入っている版 {}、最新 {shown}）", join_versions(versions))),
             }
-            Ok(RunOutput { code, text, .. }) => UpdateOutcome::Finished { ok: true, code, step, output: tail(&text), timed_out: false },
-        };
+        }
+        _ => Some(format!("更新できたか確認できませんでした（入っている版を読めません、最新 {shown}）")),
+    };
+    let mut output = tail(&text);
+    match verdict {
+        None => finished(true, code, output, false),
+        Some(line) => {
+            if !output.is_empty() {
+                output.push('\n');
+            }
+            output.push_str(&line);
+            finished(false, code, output, false)
+        }
     }
-    last
 }
 
-/// What "更新" runs: the judgment of the way (`brew list`, at most `LIST_TIME_LIMIT`) and then the
-/// update, all within the one `limit`: the judgment is part of it, not extra.
-pub fn detect_and_update(bundled: bool, exists: &dyn Fn(&Path) -> bool, runner: &dyn Runner, limit: Duration) -> UpdateOutcome {
+fn join_versions(versions: &[Version]) -> String {
+    versions.iter().map(Version::to_string).collect::<Vec<_>>().join("、")
+}
+
+/// What "更新" runs: the judgment of the way (`brew list` for each brew, at most `LIST_TIME_LIMIT`
+/// each) and then the update, all within the one `limit`: the judgment is part of it, not extra.
+pub fn detect_and_update(bundle: Option<&Path>, latest: &str, exists: &dyn Fn(&Path) -> bool, runner: &dyn Runner, limit: Duration) -> UpdateOutcome {
     let deadline = Instant::now() + limit;
-    let plan = plan(bundled, exists, runner, LIST_TIME_LIMIT.min(limit));
-    run_update(&plan, runner, deadline.saturating_duration_since(Instant::now()))
+    let plan = plan(bundle, exists, runner, LIST_TIME_LIMIT.min(limit));
+    run_update(&plan, latest, runner, deadline.saturating_duration_since(Instant::now()))
 }
 
 /// Lets one update run at a time.
@@ -443,7 +550,7 @@ where
     let Some(_running) = gate.enter() else {
         return Ok(UpdateOutcome::Busy);
     };
-    tauri::async_runtime::spawn_blocking(work).await.map_err(|e| format!("the update could not be run: {e}"))
+    tauri::async_runtime::spawn_blocking(work).await.map_err(|e| format!("更新を実行できませんでした（{e}）"))
 }
 
 impl Drop for UpdateRunning<'_> {
@@ -528,18 +635,27 @@ mod tests {
         }
     }
 
+    fn reason_of(result: Result<HttpAnswer, CheckFailure>) -> String {
+        let UpdateCheck::Unknown { reason, .. } = checked("0.2.0", result) else { panic!() };
+        reason
+    }
+
     #[test]
-    fn a_refusal_or_a_failure_is_unknown_with_a_reason() {
-        let UpdateCheck::Unknown { reason, .. } = checked("0.2.0", Ok(answer(403, r#"{"message":"API rate limit exceeded"}"#))) else {
-            panic!()
-        };
-        assert!(reason.contains("rate limit") && reason.contains("403"), "{reason}");
-        let UpdateCheck::Unknown { reason, .. } = checked("0.2.0", Ok(answer(404, "{}"))) else { panic!() };
-        assert!(reason.contains("no release"), "{reason}");
-        let UpdateCheck::Unknown { reason, .. } = checked("0.2.0", Ok(answer(500, ""))) else { panic!() };
-        assert!(reason.contains("500"), "{reason}");
-        let failed = checked("0.2.0", Err(CheckFailure("could not connect to GitHub".into())));
-        assert_eq!(failed, UpdateCheck::Unknown { current: "0.2.0".into(), reason: "could not connect to GitHub".into() });
+    fn each_kind_of_failure_has_its_own_sentence_in_japanese() {
+        let refused = reason_of(Ok(answer(403, r#"{"message":"API rate limit exceeded"}"#)));
+        assert_eq!(refused, "GitHub に断られました（回数の上限の可能性があります。HTTP 403）");
+        assert!(reason_of(Ok(answer(429, ""))).contains("HTTP 429"));
+        assert_eq!(reason_of(Ok(answer(404, "{}"))), "公開された release がありません（HTTP 404）");
+        assert_eq!(reason_of(Ok(answer(500, ""))), "確認できませんでした（GitHub が HTTP 500 を返しました）");
+        assert_eq!(reason_of(Ok(answer(200, "not json"))), "GitHub の応答の形が想定と違います（JSON ではありません）");
+        assert_eq!(reason_of(Ok(answer(200, "{}"))), "GitHub の応答の形が想定と違います（tag_name がありません）");
+        assert!(reason_of(Ok(answer(200, r#"{"tag_name":"latest"}"#))).contains("tag「latest」は版ではありません"));
+        assert_eq!(reason_of(Err(CheckFailure::Network("接続できません"))), "GitHub に届きません（接続できません）");
+        assert_eq!(reason_of(Err(CheckFailure::Other("何か".into()))), "確認できませんでした（何か）");
+        // No English is left in any of them (the status number and the names are the only ASCII words).
+        for reason in [&refused, &reason_of(Ok(answer(500, "")))] {
+            assert!(!reason.contains("refused") && !reason.contains("answered") && !reason.contains("could not"), "{reason}");
+        }
     }
 
     #[test]
@@ -582,44 +698,42 @@ mod tests {
     }
 
     #[test]
-    fn brew_is_looked_for_in_order_without_path() {
+    fn brews_are_looked_for_in_order_without_path() {
         let both = |_: &Path| true;
-        assert_eq!(find_brew(&both), Some(PathBuf::from("/opt/homebrew/bin/brew")));
+        assert_eq!(find_brews(&both), [PathBuf::from("/opt/homebrew/bin/brew"), PathBuf::from("/usr/local/bin/brew")]);
         let intel_only = |p: &Path| p == Path::new("/usr/local/bin/brew");
-        assert_eq!(find_brew(&intel_only), Some(PathBuf::from("/usr/local/bin/brew")));
-        assert_eq!(find_brew(&|_: &Path| false), None);
-    }
-
-    #[test]
-    fn the_update_commands_are_argument_lists() {
-        assert_eq!(update_steps(), [vec!["update"], vec!["upgrade", "--cask", "binone"]]);
+        assert_eq!(find_brews(&intel_only), [PathBuf::from("/usr/local/bin/brew")]);
+        assert!(find_brews(&|_: &Path| false).is_empty());
     }
 
     #[test]
     fn an_app_bundle_is_told_from_a_development_build() {
-        assert!(is_app_bundle(Path::new("/Applications/binone.app/Contents/MacOS/binone")));
-        assert!(is_app_bundle(Path::new("/Users/someone/Applications/binone.app/Contents/MacOS/binone")));
-        assert!(!is_app_bundle(Path::new("/work/client/src-tauri/target/debug/binone")));
-        assert!(!is_app_bundle(Path::new("/work/binone.app.d/binone")));
+        let bundle = |p: &str| app_bundle(Path::new(p));
+        assert_eq!(bundle("/Applications/binone.app/Contents/MacOS/binone"), Some(PathBuf::from("/Applications/binone.app")));
+        assert_eq!(bundle("/Users/someone/Applications/binone.app/Contents/MacOS/binone"), Some(PathBuf::from("/Users/someone/Applications/binone.app")));
+        assert_eq!(bundle("/work/client/src-tauri/target/debug/binone"), None);
+        assert_eq!(bundle("/work/binone.app.d/binone"), None);
     }
 
     /// Answers each call from a script and remembers what was run.
     struct Fake {
         script: RefCell<Vec<Result<RunOutput, String>>>,
         calls: RefCell<Vec<String>>,
+        envs: RefCell<Vec<Vec<(String, String)>>>,
         limits: RefCell<Vec<Duration>>,
     }
 
     impl Fake {
         fn new(script: Vec<Result<RunOutput, String>>) -> Self {
-            Fake { script: RefCell::new(script), calls: RefCell::new(Vec::new()), limits: RefCell::new(Vec::new()) }
+            Fake { script: RefCell::new(script), calls: RefCell::new(Vec::new()), envs: RefCell::new(Vec::new()), limits: RefCell::new(Vec::new()) }
         }
     }
 
     impl Runner for Fake {
-        fn run(&self, program: &Path, args: &[&str], limit: Duration) -> Result<RunOutput, String> {
+        fn run(&self, program: &Path, args: &[&str], env: &[(&str, &str)], limit: Duration) -> Result<RunOutput, String> {
             self.limits.borrow_mut().push(limit);
             self.calls.borrow_mut().push(format!("{} {}", program.display(), args.join(" ")));
+            self.envs.borrow_mut().push(env.iter().map(|(k, v)| ((*k).to_owned(), (*v).to_owned())).collect());
             self.script.borrow_mut().remove(0)
         }
     }
@@ -639,49 +753,92 @@ mod tests {
     const LIMIT: Duration = Duration::from_secs(600);
 
     const BREW: &str = "/opt/homebrew/bin/brew";
+    const INTEL: &str = "/usr/local/bin/brew";
+    const TAP_DIR: &str = "/opt/homebrew/Library/Taps/unagents/homebrew-tap";
+    const BUNDLE: &str = "/Applications/binone.app";
+
+    /// The calls of a whole update when everything goes well, up to the upgrade's answer.
+    fn tap_ok() -> Vec<Result<RunOutput, String>> {
+        vec![out(0, &format!("{TAP_DIR}\n")), out(0, "Already up to date.")]
+    }
+
+    fn update_script(upgrade: Result<RunOutput, String>, installed: Result<RunOutput, String>) -> Fake {
+        let mut script = tap_ok();
+        script.push(upgrade);
+        script.push(installed);
+        Fake::new(script)
+    }
+
+    fn finished(outcome: UpdateOutcome) -> (bool, Option<i32>, String, String, bool, Option<String>) {
+        let UpdateOutcome::Finished { ok, code, step, output, timed_out, note } = outcome else { panic!("{outcome:?}") };
+        (ok, code, step, output, timed_out, note)
+    }
+
+    // --- Which brew -------------------------------------------------------------------------
 
     #[test]
-    fn with_brew_and_the_cask_the_plan_is_brew() {
+    fn with_one_brew_that_has_the_cask_the_plan_is_that_brew() {
         let fake = Fake::new(vec![out(0, "binone")]);
-        assert_eq!(plan(true, &|_| true, &fake, LIST_TIME_LIMIT), Plan::Brew(PathBuf::from(BREW)));
-        assert_eq!(*fake.calls.borrow(), [format!("{BREW} list --cask binone")]);
+        assert_eq!(plan(Some(Path::new(BUNDLE)), &|_| true, &Fake::new(vec![out(0, "x"), out(1, "")]), LIST_TIME_LIMIT), Plan::Brew(PathBuf::from(BREW)));
+        let only_intel = |p: &Path| p == Path::new(INTEL);
+        assert_eq!(plan(Some(Path::new(BUNDLE)), &only_intel, &fake, LIST_TIME_LIMIT), Plan::Brew(PathBuf::from(INTEL)));
+        assert_eq!(*fake.calls.borrow(), [format!("{INTEL} list --cask binone")]);
         assert_eq!(*fake.limits.borrow(), [Duration::from_secs(10)]);
         assert_eq!(Plan::Brew(PathBuf::from(BREW)).method(), UpdateMethod::Brew);
     }
 
     #[test]
-    fn a_list_that_runs_out_of_time_is_not_the_cask() {
-        let fake = Fake::new(vec![stopped("")]);
-        assert_eq!(plan(true, &|_| true, &fake, LIST_TIME_LIMIT), Plan::Manual(ManualReason::NotInstalledByCask));
-        assert_eq!(
-            Plan::Manual(ManualReason::NoBrew).method(),
-            UpdateMethod::Manual { reason: ManualReason::NoBrew }
-        );
+    fn the_brew_that_has_the_cask_is_used_even_when_it_is_the_second() {
+        // The first brew is there but does not have the cask (the case on the Mac this was found on, reversed).
+        let fake = Fake::new(vec![out(1, "Error: Cask 'binone' is not installed."), out(0, "binone")]);
+        assert_eq!(plan(Some(Path::new(BUNDLE)), &|_| true, &fake, LIST_TIME_LIMIT), Plan::Brew(PathBuf::from(INTEL)));
+        assert_eq!(*fake.calls.borrow(), [format!("{BREW} list --cask binone"), format!("{INTEL} list --cask binone")]);
+        // A brew that cannot start or runs out of time does not have it either.
+        let broken = Fake::new(vec![Err("x".into()), out(0, "")]);
+        assert_eq!(plan(Some(Path::new(BUNDLE)), &|_| true, &broken, LIST_TIME_LIMIT), Plan::Brew(PathBuf::from(INTEL)));
+        let slow = Fake::new(vec![stopped(""), out(0, "")]);
+        assert_eq!(plan(Some(Path::new(BUNDLE)), &|_| true, &slow, LIST_TIME_LIMIT), Plan::Brew(PathBuf::from(INTEL)));
     }
 
     #[test]
-    fn without_brew_nothing_is_run() {
+    fn with_the_cask_in_both_the_one_that_names_the_running_bundle_is_used() {
+        let names_it = format!("/usr/local/Caskroom/binone/0.3.0\n{BUNDLE} (1 files)");
+        let other = "/opt/homebrew/Caskroom/binone/0.3.0\n/Users/x/Applications/binone.app (1 files)";
+        let fake = Fake::new(vec![out(0, other), out(0, &names_it)]);
+        assert_eq!(plan(Some(Path::new(BUNDLE)), &|_| true, &fake, LIST_TIME_LIMIT), Plan::Brew(PathBuf::from(INTEL)));
+        // The first one names it: the second is not asked.
+        let first = Fake::new(vec![out(0, &names_it)]);
+        assert_eq!(plan(Some(Path::new(BUNDLE)), &|_| true, &first, LIST_TIME_LIMIT), Plan::Brew(PathBuf::from(BREW)));
+        assert_eq!(first.calls.borrow().len(), 1);
+        // Neither names it (or nothing is printed): /opt/homebrew first.
+        let unclear = Fake::new(vec![out(0, ""), out(0, "")]);
+        assert_eq!(plan(Some(Path::new(BUNDLE)), &|_| true, &unclear, LIST_TIME_LIMIT), Plan::Brew(PathBuf::from(BREW)));
+        // The bundle of another place is not mistaken for a longer name of this one.
+        let longer = Fake::new(vec![out(0, "/Applications/binone.app.old"), out(0, &names_it)]);
+        assert_eq!(plan(Some(Path::new(BUNDLE)), &|_| true, &longer, LIST_TIME_LIMIT), Plan::Brew(PathBuf::from(INTEL)));
+    }
+
+    #[test]
+    fn with_the_cask_in_neither_the_plan_is_manual() {
+        let fake = Fake::new(vec![out(1, "Error"), out(1, "Error")]);
+        assert_eq!(plan(Some(Path::new(BUNDLE)), &|_| true, &fake, LIST_TIME_LIMIT), Plan::Manual(ManualReason::NotInstalledByCask));
+        assert_eq!(fake.calls.borrow().len(), 2);
+        assert_eq!(Plan::Manual(ManualReason::NoBrew).method(), UpdateMethod::Manual { reason: ManualReason::NoBrew });
+    }
+
+    #[test]
+    fn without_brew_or_outside_a_bundle_nothing_is_run() {
         let fake = Fake::new(vec![]);
-        assert_eq!(plan(true, &|_| false, &fake, LIST_TIME_LIMIT), Plan::Manual(ManualReason::NoBrew));
-        assert!(fake.calls.borrow().is_empty());
-    }
-
-    #[test]
-    fn without_the_cask_or_outside_a_bundle_the_plan_is_manual() {
-        let not_installed = Fake::new(vec![out(1, "Error: Cask 'binone' is not installed.")]);
-        assert_eq!(plan(true, &|_| true, &not_installed, LIST_TIME_LIMIT), Plan::Manual(ManualReason::NotInstalledByCask));
-        let cannot_start = Fake::new(vec![Err("could not start".into())]);
-        assert_eq!(plan(true, &|_| true, &cannot_start, LIST_TIME_LIMIT), Plan::Manual(ManualReason::NotInstalledByCask));
+        assert_eq!(plan(Some(Path::new(BUNDLE)), &|_| false, &fake, LIST_TIME_LIMIT), Plan::Manual(ManualReason::NoBrew));
         // A development build is not the cask's app, even when the cask is installed.
-        let dev = Fake::new(vec![]);
-        assert_eq!(plan(false, &|_| true, &dev, LIST_TIME_LIMIT), Plan::Manual(ManualReason::NotInstalledByCask));
-        assert!(dev.calls.borrow().is_empty());
+        assert_eq!(plan(None, &|_| true, &fake, LIST_TIME_LIMIT), Plan::Manual(ManualReason::NotInstalledByCask));
+        assert!(fake.calls.borrow().is_empty());
     }
 
     #[test]
     fn a_manual_plan_runs_nothing_and_gives_the_page_and_the_command() {
         let fake = Fake::new(vec![]);
-        let outcome = run_update(&Plan::Manual(ManualReason::NoBrew), &fake, LIMIT);
+        let outcome = run_update(&Plan::Manual(ManualReason::NoBrew), "0.3.0", &fake, LIMIT);
         assert_eq!(outcome, UpdateOutcome::Manual { reason: ManualReason::NoBrew, command: MANUAL_COMMAND, url: RELEASES_PAGE_URL });
         assert!(fake.calls.borrow().is_empty());
         assert_eq!(MANUAL_COMMAND, "brew upgrade --cask binone");
@@ -689,92 +846,197 @@ mod tests {
         assert!(text.starts_with(r#"{"state":"manual","reason":"no_brew""#), "{text}");
     }
 
+    // --- The update -------------------------------------------------------------------------
+
     #[test]
-    fn an_update_runs_both_steps_in_order() {
-        let fake = Fake::new(vec![out(0, "Updated 1 tap"), out(0, "==> Upgrading binone\n🍺  binone was successfully upgraded!")]);
-        let outcome = run_update(&brew(), &fake, LIMIT);
-        assert_eq!(*fake.calls.borrow(), [format!("{BREW} update"), format!("{BREW} upgrade --cask binone")]);
-        let UpdateOutcome::Finished { ok, code, step, output, .. } = outcome else { panic!() };
-        assert!(ok);
-        assert_eq!(code, Some(0));
-        assert_eq!(step, "brew upgrade --cask binone");
+    fn an_update_refreshes_only_the_tap_then_upgrades_and_reads_the_version() {
+        let fake = update_script(out(0, "==> Upgrading binone\n🍺  binone was successfully upgraded!"), out(0, "binone 0.3.0\n"));
+        let (ok, code, step, output, timed_out, note) = finished(run_update(&brew(), "0.3.0", &fake, LIMIT));
+        assert_eq!(
+            *fake.calls.borrow(),
+            [
+                format!("{BREW} --repo unagents/tap"),
+                format!("/usr/bin/git -C {TAP_DIR} pull --ff-only"),
+                format!("{BREW} upgrade --cask binone"),
+                format!("{BREW} list --cask --versions binone"),
+            ]
+        );
+        assert!(ok && !timed_out && note.is_none());
+        assert_eq!((code, step.as_str()), (Some(0), "brew upgrade --cask binone"));
         assert!(output.contains("successfully upgraded"));
+        // `brew update` is never run.
+        assert!(!fake.calls.borrow().iter().any(|c| c.ends_with(" update")));
     }
 
     #[test]
-    fn a_failing_step_stops_the_update_with_its_code_and_output() {
-        let fake = Fake::new(vec![out(1, "Error: could not update")]);
-        let outcome = run_update(&brew(), &fake, LIMIT);
-        assert_eq!(fake.calls.borrow().len(), 1);
-        assert_eq!(outcome, UpdateOutcome::Finished { ok: false, code: Some(1), step: "brew update".into(), output: "Error: could not update".into(), timed_out: false });
+    fn only_the_upgrade_gets_the_no_auto_update_variable() {
+        let fake = update_script(out(0, ""), out(0, "binone 0.3.0"));
+        run_update(&brew(), "0.3.0", &fake, LIMIT);
+        let envs = fake.envs.borrow();
+        assert_eq!(envs[2], [("HOMEBREW_NO_AUTO_UPDATE".to_owned(), "1".to_owned())]);
+        assert!(envs[0].is_empty() && envs[1].is_empty() && envs[3].is_empty(), "{envs:?}");
+        assert_eq!(UPGRADE_ENV, [("HOMEBREW_NO_AUTO_UPDATE", "1")]);
+    }
 
-        let fake = Fake::new(vec![out(0, ""), out(1, "Error: Cask 'binone' is not installed")]);
-        let UpdateOutcome::Finished { ok, code, step, .. } = run_update(&brew(), &fake, LIMIT) else { panic!() };
-        assert!(!ok);
-        assert_eq!((code, step.as_str()), (Some(1), "brew upgrade --cask binone"));
+    #[test]
+    fn a_tap_that_cannot_be_refreshed_does_not_stop_the_upgrade() {
+        // `git pull` fails.
+        let fake = Fake::new(vec![out(0, TAP_DIR), out(1, "fatal: Not possible to fast-forward"), out(0, ""), out(0, "binone 0.3.0")]);
+        let (ok, _, _, _, _, note) = finished(run_update(&brew(), "0.3.0", &fake, LIMIT));
+        assert!(ok);
+        let note = note.unwrap();
+        assert!(note.contains("unagents/tap") && note.contains("終了 code 1"), "{note}");
+        assert_eq!(fake.calls.borrow().len(), 4);
+        // The tap's directory cannot be had: git is not run.
+        for bad in [out(1, "Error: No available tap"), out(0, "  \n"), Err("起動できません".to_owned())] {
+            let fake = Fake::new(vec![bad, out(0, ""), out(0, "binone 0.3.0")]);
+            let (ok, _, _, _, _, note) = finished(run_update(&brew(), "0.3.0", &fake, LIMIT));
+            assert!(ok && note.is_some());
+            assert!(!fake.calls.borrow().iter().any(|c| c.contains("git")), "{:?}", fake.calls.borrow());
+        }
+        // git cannot start, or runs out of time.
+        for bad in [Err("git を起動できませんでした".to_owned()), stopped("")] {
+            let fake = Fake::new(vec![out(0, TAP_DIR), bad, out(0, ""), out(0, "binone 0.3.0")]);
+            let (ok, _, _, _, _, note) = finished(run_update(&brew(), "0.3.0", &fake, LIMIT));
+            assert!(ok && note.is_some());
+        }
+        // The note is kept when the upgrade fails too.
+        let fake = Fake::new(vec![out(1, ""), out(1, "Error: Cask 'binone' is not installed")]);
+        let (ok, code, _, _, _, note) = finished(run_update(&brew(), "0.3.0", &fake, LIMIT));
+        assert!(!ok && note.is_some());
+        assert_eq!(code, Some(1));
+    }
 
-        let killed = Fake::new(vec![Ok(RunOutput { code: None, text: String::new(), timed_out: false })]);
-        let UpdateOutcome::Finished { ok, code, .. } = run_update(&brew(), &killed, LIMIT) else { panic!() };
+    #[test]
+    fn the_path_of_the_tap_is_a_single_argument() {
+        // A directory with blanks or shell characters stays one argument of git (no shell is used).
+        let fake = Fake::new(vec![out(0, "warning: x\n/Users/a b/Taps/$(x);y\n"), out(0, ""), out(0, ""), out(0, "binone 0.3.0")]);
+        run_update(&brew(), "0.3.0", &fake, LIMIT);
+        assert_eq!(fake.calls.borrow()[1], "/usr/bin/git -C /Users/a b/Taps/$(x);y pull --ff-only");
+    }
+
+    #[test]
+    fn a_failing_upgrade_stops_with_its_code_and_output() {
+        let fake = update_script(out(1, "Error: Cask 'binone' is not installed"), out(0, ""));
+        let outcome = run_update(&brew(), "0.3.0", &fake, LIMIT);
+        // No look at the version after a failure.
+        assert_eq!(fake.calls.borrow().len(), 3);
+        assert_eq!(
+            outcome,
+            UpdateOutcome::Finished { ok: false, code: Some(1), step: "brew upgrade --cask binone".into(), output: "Error: Cask 'binone' is not installed".into(), timed_out: false, note: None }
+        );
+
+        let killed = update_script(Ok(RunOutput { code: None, text: String::new(), timed_out: false }), out(0, ""));
+        let (ok, code, ..) = finished(run_update(&brew(), "0.3.0", &killed, LIMIT));
         assert!(!ok && code.is_none());
 
-        let missing = Fake::new(vec![Err("could not start brew: NotFound".into())]);
-        let UpdateOutcome::Finished { ok, output, .. } = run_update(&brew(), &missing, LIMIT) else { panic!() };
+        let missing = update_script(Err("/opt/homebrew/bin/brew を起動できませんでした（NotFound）".into()), out(0, ""));
+        let (ok, _, _, output, ..) = finished(run_update(&brew(), "0.3.0", &missing, LIMIT));
         assert!(!ok && output.contains("NotFound"));
     }
 
     #[test]
-    fn a_step_out_of_time_ends_the_update_as_timed_out_with_the_output_so_far() {
-        let fake = Fake::new(vec![out(0, ""), stopped("==> Downloading\nstill going")]);
-        let outcome = run_update(&brew(), &fake, LIMIT);
-        let UpdateOutcome::Finished { ok, code, step, output, timed_out } = outcome else { panic!() };
+    fn an_upgrade_out_of_time_ends_the_update_as_timed_out_with_the_output_so_far() {
+        let fake = update_script(stopped("==> Downloading\nstill going"), out(0, ""));
+        let (ok, code, step, output, timed_out, _) = finished(run_update(&brew(), "0.3.0", &fake, LIMIT));
         assert!(!ok && timed_out && code.is_none());
         assert_eq!(step, "brew upgrade --cask binone");
         assert!(output.contains("still going"));
-        assert!(serde_json::to_string(&UpdateOutcome::Finished { ok, code, step, output, timed_out }).unwrap().contains(r#""timed_out":true"#));
-        // The first step too: nothing after it is run.
-        let fake = Fake::new(vec![stopped("x")]);
-        assert!(matches!(run_update(&brew(), &fake, LIMIT), UpdateOutcome::Finished { timed_out: true, .. }));
-        assert_eq!(fake.calls.borrow().len(), 1);
+        assert_eq!(fake.calls.borrow().len(), 3);
+        let text = serde_json::to_string(&run_update(&brew(), "0.3.0", &update_script(stopped(""), out(0, "")), LIMIT)).unwrap();
+        assert!(text.contains(r#""timed_out":true"#), "{text}");
+    }
+
+    #[test]
+    fn the_installed_version_must_be_the_latest_for_the_update_to_count() {
+        // The same: done.
+        let same = update_script(out(0, "upgraded"), out(0, "binone 0.3.0"));
+        assert!(finished(run_update(&brew(), "v0.3.0", &same, LIMIT)).0);
+        // Another version of the same cask kept beside it does not hide that the latest is there.
+        let several = update_script(out(0, "upgraded"), out(0, "binone 0.2.0 0.3.0"));
+        assert!(finished(run_update(&brew(), "0.3.0", &several, LIMIT)).0);
+        // A different one (brew ended with 0 and did nothing): not done, with both versions in the end of the output.
+        let stale = update_script(out(0, "Warning: binone 0.2.0 already installed"), out(0, "binone 0.2.0\n"));
+        let (ok, code, _, output, timed_out, _) = finished(run_update(&brew(), "0.3.0", &stale, LIMIT));
+        assert!(!ok && !timed_out);
+        assert_eq!(code, Some(0));
+        assert!(output.starts_with("Warning: binone 0.2.0 already installed\n"), "{output}");
+        assert!(output.ends_with("更新されませんでした（入っている版 0.2.0、最新 0.3.0）"), "{output}");
+        // A newer one than the latest is also "not the same".
+        let newer = update_script(out(0, ""), out(0, "binone 0.4.0"));
+        let (ok, _, _, output, ..) = finished(run_update(&brew(), "0.3.0", &newer, LIMIT));
+        assert!(!ok && output.ends_with("更新されませんでした（入っている版 0.4.0、最新 0.3.0）"), "{output}");
+    }
+
+    #[test]
+    fn a_version_that_cannot_be_read_is_not_reported_as_done() {
+        // Not done, and said so in other words than "not updated": it is not known.
+        let cases = [
+            update_script(out(0, "upgraded"), out(0, "")),
+            update_script(out(0, "upgraded"), out(0, "binone")),
+            update_script(out(0, "upgraded"), out(0, "binone nightly")),
+            update_script(out(0, "upgraded"), out(0, "other 0.3.0")),
+            update_script(out(0, "upgraded"), out(1, "Error: Cask 'binone' is not installed.")),
+            update_script(out(0, "upgraded"), stopped("")),
+            update_script(out(0, "upgraded"), Err("x".into())),
+        ];
+        for fake in cases {
+            let (ok, code, _, output, timed_out, _) = finished(run_update(&brew(), "0.3.0", &fake, LIMIT));
+            assert!(!ok && !timed_out && code == Some(0));
+            assert!(output.ends_with("更新できたか確認できませんでした（入っている版を読めません、最新 0.3.0）"), "{output}");
+        }
+        // The latest version is not known either: nothing to compare with.
+        let fake = update_script(out(0, "upgraded"), out(0, "binone 0.3.0"));
+        let (ok, _, _, output, ..) = finished(run_update(&brew(), "", &fake, LIMIT));
+        assert!(!ok && output.ends_with("更新できたか確認できませんでした（最新の版が分かりません、入っている版 0.3.0）"), "{output}");
     }
 
     #[test]
     fn the_steps_share_one_time_limit() {
-        let fake = Fake::new(vec![out(0, ""), out(0, "")]);
-        run_update(&brew(), &fake, LIMIT);
+        let fake = update_script(out(0, ""), out(0, "binone 0.3.0"));
+        run_update(&brew(), "0.3.0", &fake, LIMIT);
         let limits = fake.limits.borrow();
+        assert_eq!(limits.len(), 4);
         assert!(limits[0] <= LIMIT && limits[0] > LIMIT - Duration::from_secs(5));
-        assert!(limits[1] <= limits[0]);
+        assert!(limits.windows(2).all(|w| w[1] <= w[0]), "{limits:?}");
         // A limit already used up leaves nothing for the next step.
-        let fake = Fake::new(vec![out(0, ""), out(0, "")]);
-        run_update(&brew(), &fake, Duration::ZERO);
-        assert_eq!(*fake.limits.borrow(), [Duration::ZERO, Duration::ZERO]);
+        let fake = update_script(out(0, ""), out(0, ""));
+        run_update(&brew(), "0.3.0", &fake, Duration::ZERO);
+        assert_eq!(*fake.limits.borrow(), [Duration::ZERO; 4]);
     }
 
     #[test]
     fn the_judgment_shares_the_one_limit_with_the_update() {
-        let fake = Fake::new(vec![out(0, "binone"), out(0, ""), out(0, "")]);
-        let outcome = detect_and_update(true, &|_| true, &fake, LIMIT);
+        // Two brews are asked, then the tap, the upgrade and the version.
+        let mut script = vec![out(0, "binone"), out(0, "binone")];
+        script.extend(tap_ok());
+        script.extend([out(0, ""), out(0, "binone 0.3.0")]);
+        let fake = Fake::new(script);
+        let outcome = detect_and_update(Some(Path::new(BUNDLE)), "0.3.0", &|_| true, &fake, LIMIT);
         assert!(matches!(outcome, UpdateOutcome::Finished { ok: true, .. }), "{outcome:?}");
         let limits = fake.limits.borrow();
-        assert_eq!(limits[0], LIST_TIME_LIMIT);
-        assert!(limits[1] <= LIMIT && limits[2] <= limits[1], "{limits:?}");
-        // A limit shorter than the list limit caps the list call too.
-        let short = Fake::new(vec![stopped("")]);
-        detect_and_update(true, &|_| true, &short, Duration::from_secs(3));
-        assert_eq!(short.limits.borrow()[0], Duration::from_secs(3));
+        assert_eq!((limits[0], limits[1]), (LIST_TIME_LIMIT, LIST_TIME_LIMIT));
+        assert!(limits[2] <= LIMIT && limits.windows(2).skip(2).all(|w| w[1] <= w[0]), "{limits:?}");
+        // A limit shorter than the list limit caps the list calls too.
+        let short = Fake::new(vec![stopped(""), stopped("")]);
+        detect_and_update(Some(Path::new(BUNDLE)), "0.3.0", &|_| true, &short, Duration::from_secs(3));
+        assert_eq!(*short.limits.borrow(), [Duration::from_secs(3); 2]);
     }
 
     #[test]
     fn a_judgment_that_used_the_time_leaves_less_for_the_steps() {
         struct Slow(Fake);
         impl Runner for Slow {
-            fn run(&self, program: &Path, args: &[&str], limit: Duration) -> Result<RunOutput, String> {
+            fn run(&self, program: &Path, args: &[&str], env: &[(&str, &str)], limit: Duration) -> Result<RunOutput, String> {
                 std::thread::sleep(Duration::from_millis(200));
-                self.0.run(program, args, limit)
+                self.0.run(program, args, env, limit)
             }
         }
-        let slow = Slow(Fake::new(vec![out(0, "binone"), out(0, ""), out(0, "")]));
-        detect_and_update(true, &|_| true, &slow, Duration::from_secs(60));
+        let mut script = vec![out(0, "binone")];
+        script.extend(tap_ok());
+        script.extend([out(0, ""), out(0, "binone 0.3.0")]);
+        let slow = Slow(Fake::new(script));
+        detect_and_update(Some(Path::new(BUNDLE)), "0.3.0", &|p| p == Path::new(BREW), &slow, Duration::from_secs(60));
         let limits = slow.0.limits.borrow();
         assert!(limits[1] < Duration::from_secs(60) - Duration::from_millis(150), "{limits:?}");
     }
@@ -805,9 +1067,9 @@ mod tests {
         let gate = UpdateGate::default();
         type Work = Box<dyn FnOnce() -> UpdateOutcome + Send>;
         let ending: [(&str, Work); 4] = [
-            ("success", Box::new(|| run_update(&brew(), &Fake::new(vec![out(0, ""), out(0, "ok")]), LIMIT))),
-            ("failure", Box::new(|| run_update(&brew(), &Fake::new(vec![out(1, "Error")]), LIMIT))),
-            ("timeout", Box::new(|| run_update(&brew(), &Fake::new(vec![stopped("slow")]), LIMIT))),
+            ("success", Box::new(|| run_update(&brew(), "0.3.0", &update_script(out(0, "ok"), out(0, "binone 0.3.0")), LIMIT))),
+            ("failure", Box::new(|| run_update(&brew(), "0.3.0", &update_script(out(1, "Error"), out(0, "")), LIMIT))),
+            ("timeout", Box::new(|| run_update(&brew(), "0.3.0", &update_script(stopped("slow"), out(0, "")), LIMIT))),
             ("panic", Box::new(|| panic!("the update panicked"))),
         ];
         for (name, work) in ending {
@@ -835,7 +1097,7 @@ mod tests {
 
         fn sh(script: &str, limit: Duration) -> (Result<RunOutput, String>, Duration) {
             let started = Instant::now();
-            let answer = SystemRunner.run(Path::new("/bin/sh"), &["-c", script], limit);
+            let answer = SystemRunner.run(Path::new("/bin/sh"), &["-c", script], &[], limit);
             (answer, started.elapsed())
         }
 
@@ -932,9 +1194,16 @@ mod tests {
         }
 
         #[test]
+        fn the_given_variables_are_added_to_what_the_program_inherits() {
+            let answer = SystemRunner.run(Path::new("/bin/sh"), &["-c", "echo $BINONE_TEST_ADDED:$PATH"], &[("BINONE_TEST_ADDED", "1")], Duration::from_secs(30));
+            let text = answer.unwrap().text;
+            assert!(text.starts_with("1:") && text.trim_end().len() > 3, "{text:?}");
+        }
+
+        #[test]
         fn a_program_that_cannot_start_is_an_error() {
-            let answer = SystemRunner.run(Path::new("/nonexistent/brew"), &[], Duration::from_secs(1));
-            assert!(answer.unwrap_err().contains("could not start"));
+            let answer = SystemRunner.run(Path::new("/nonexistent/brew"), &[], &[], Duration::from_secs(1));
+            assert!(answer.unwrap_err().contains("起動できませんでした"));
         }
     }
 }

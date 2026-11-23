@@ -21,7 +21,7 @@ export type UpdateCheck =
 export type UpdateOutcome =
   | { state: "manual"; reason: ManualReason; command: string; url: string }
   | { state: "busy" }
-  | { state: "finished"; ok: boolean; code: number | null; step: string; output: string; timed_out: boolean };
+  | { state: "finished"; ok: boolean; code: number | null; step: string; output: string; timed_out: boolean; note?: string | null };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
@@ -43,7 +43,7 @@ function isUpdateMethod(value: unknown): value is UpdateMethod {
 
 /** An answer that is not a check, or a failed call, as an `unknown` check (the screen stays whole). */
 export function unknownCheck(current: string, error: unknown): UpdateCheck {
-  const reason = isRecord(error) && typeof error.detail === "string" ? error.detail : typeof error === "string" ? error : "the check could not be made";
+  const reason = isRecord(error) && typeof error.detail === "string" ? error.detail : typeof error === "string" ? error : "確認できませんでした";
   return { state: "unknown", current, reason };
 }
 
@@ -76,7 +76,7 @@ export function statusText(check: UpdateCheck | null, checking: boolean): string
     case "available":
       return "新しい版があります";
     case "unknown":
-      return `確認できません（${check.reason}）`;
+      return `確認できません。${check.reason}`;
   }
 }
 
@@ -104,10 +104,11 @@ export function manualReasonText(reason: ManualReason): string {
     : "このアプリは Homebrew の cask（binone）で入れたものではないので、アプリからは更新できません。";
 }
 
-/** One line about how an update ended. */
+/** The line about how an update ended, with what went wrong on the way (the tap) after it. */
 export function finishedText(outcome: Extract<UpdateOutcome, { state: "finished" }>): string {
-  if (outcome.ok) return "更新しました。再起動すると新しい版で立ち上がります。";
-  if (outcome.timed_out) return `更新が時間切れになりました（${outcome.step}、${UPDATE_LIMIT_MINUTES} 分を超えたので止めました）。もう一度「更新」を押せます。`;
+  const note = outcome.note ? ` ${outcome.note}` : "";
+  if (outcome.ok) return `更新しました。再起動すると新しい版で立ち上がります。${note}`;
+  if (outcome.timed_out) return `更新が時間切れになりました（${outcome.step}、${UPDATE_LIMIT_MINUTES} 分を超えたので止めました）。もう一度「更新」を押せます。${note}`;
   const code = outcome.code === null ? "終了 code なし" : `終了 code ${outcome.code}`;
-  return `更新に失敗しました（${outcome.step}、${code}）`;
+  return `更新に失敗しました（${outcome.step}、${code}）。${note}`.trimEnd();
 }

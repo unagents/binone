@@ -21,7 +21,7 @@ export function useUpdate() {
     checking.value = true;
     try {
       const answer = await callNative<unknown>("check_update");
-      check.value = isUpdateCheck(answer) ? answer : unknownCheck(check.value?.current ?? "", "the answer has an unexpected shape");
+      check.value = isUpdateCheck(answer) ? answer : unknownCheck(check.value?.current ?? "", "応答の形が想定と違います");
     } catch (error) {
       check.value = unknownCheck(check.value?.current ?? "", error);
     } finally {
@@ -42,13 +42,15 @@ export function useUpdate() {
     outcome.value = null;
     actionError.value = null;
     try {
-      const answer = await callNative<unknown>("run_update");
+      // The version the check found: the update counts as done only when that one is installed.
+      const latest = check.value && check.value.state !== "unknown" ? check.value.latest : "";
+      const answer = await callNative<unknown>("run_update", { latest });
       outcome.value = isUpdateOutcome(answer)
         ? answer
-        : { state: "finished", ok: false, code: null, step: "update", output: "the answer has an unexpected shape", timed_out: false };
+        : { state: "finished", ok: false, code: null, step: "更新", output: "応答の形が想定と違います", timed_out: false };
     } catch (error) {
-      const detail = typeof error === "string" ? error : "the update could not be run";
-      outcome.value = { state: "finished", ok: false, code: null, step: "update", output: detail, timed_out: false };
+      const detail = typeof error === "string" ? error : "更新を実行できませんでした";
+      outcome.value = { state: "finished", ok: false, code: null, step: "更新", output: detail, timed_out: false };
     } finally {
       updating.value = false;
     }
@@ -59,7 +61,7 @@ export function useUpdate() {
     try {
       await callNative("restart_app");
     } catch (error) {
-      actionError.value = typeof error === "string" ? error : "the app could not be restarted";
+      actionError.value = typeof error === "string" ? error : "アプリを再起動できませんでした";
     }
   }
 
@@ -67,7 +69,7 @@ export function useUpdate() {
     try {
       await callNative("open_release_page");
     } catch (error) {
-      actionError.value = typeof error === "string" ? error : "the browser could not be opened";
+      actionError.value = typeof error === "string" ? error : "ブラウザを開けませんでした";
     }
   }
 
