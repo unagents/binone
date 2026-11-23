@@ -49,7 +49,8 @@ export function createSampleServer(options: SampleOptions = {}): NativeCall {
     sample("req_2", "通知の帯の表示時間を決める", "binone", "task", [], "todo", now - 60 * MINUTE),
     sample("req_3", "memory の検索を速くする", "memory", "feature", ["perf", "search"], "prepare", now - 3 * 60 * MINUTE),
     sample("req_4", "設定の画面の文言", "binone", "task", ["ui"], "draft", now - 26 * 60 * MINUTE),
-    sample("req_5", "bantou の接続を見直す", "bantou", "feature", [], "done", now - 3 * 24 * 60 * MINUTE),
+    // The body is kept in openspec-mcp, which cannot show it: the screens say so, with the reason.
+    { ...sample("req_5", "bantou の接続を見直す", "bantou", "feature", [], "done", now - 3 * 24 * 60 * MINUTE), body: null, bodyMissing: true },
   ];
   const settings: SettingsView = {
     settings: { lanes: lanes(), kinds: ["feature", "task", "bug"], scheduler_interval_secs: 30, bantou_endpoint: null, memory_endpoint: null },
@@ -87,14 +88,16 @@ export function createSampleServer(options: SampleOptions = {}): NativeCall {
 
   function detail(r: Request): RequestDetail {
     return {
-      request: { id: r.id, title: r.title, project: r.project, kind: r.kind, tags: r.tags, protocol: r.protocol, change_ref: r.change, lane: r.lane, body: r.body, version: r.version, created_ms: r.createdMs, updated_ms: r.updatedMs },
+      request: { id: r.id, title: r.title, project: r.project, kind: r.kind, tags: r.tags, protocol: r.protocol, change_ref: r.change, lane: r.lane, body: r.bodyMissing ? null : r.body, body_missing: r.bodyMissing, version: r.version, created_ms: r.createdMs, updated_ms: r.updatedMs },
       lane: r.lane,
       steps: [],
       waits: [],
       intakes: [],
       allowed_operations: r.lane === "draft" ? ["save_draft", "submit_request"] : [],
       history: [{ source: "binone", at_ms: r.createdMs, summary: "登録" }],
-      missing_sources: [],
+      missing_sources: r.bodyMissing
+        ? [{ item: "body", service: "open_spec", kind: "external_unavailable", detail: "openspec-mcp has no tool that reads the body of a requirement", reason: "show_unsupported" }]
+        : [],
       external_notes: [],
     };
   }

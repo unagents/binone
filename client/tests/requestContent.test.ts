@@ -6,6 +6,7 @@ import { setNativeCall } from "../app/utils/api/transport";
 import type { DraftInput, Request } from "../app/types/binone";
 import {
   BODY_UNREADABLE_TEXT,
+  describeBodyUnreadable,
   afterSave,
   baseFromRequest,
   describeSaveTarget,
@@ -218,5 +219,31 @@ describe("where a save goes", () => {
   it("claims nothing when the server does not say (an older server)", () => {
     expect(describeSaveTarget(null)).toBeNull();
     expect(describeSaveTarget({ version: "0.1" })).toBeNull();
+  });
+});
+
+describe("describeBodyUnreadable", () => {
+  const body = (reason?: string | null, detail = "the server's sentence") => [
+    { item: "other", service: "open_spec" as const, kind: "internal" as const, detail: "x", reason: "not_found" },
+    { item: "body", service: "open_spec" as const, kind: "external_unavailable" as const, detail, reason },
+  ];
+
+  it("says the reason the server gives for the body", () => {
+    expect(describeBodyUnreadable(body("change_not_set"))).toBe("change が未記入のため、openspec-mcp から本文を読めません");
+    expect(describeBodyUnreadable(body("show_unsupported"))).toBe("接続先の openspec-mcp が、本文を読む操作（show）に未対応です");
+    expect(describeBodyUnreadable(body("not_found"))).toBe("openspec-mcp に、この依頼の本文が見つかりません");
+    expect(describeBodyUnreadable(body("unavailable"))).toBe("openspec-mcp に届かないため、本文を読めません");
+  });
+
+  it("falls back to the plain sentence with the server's detail when the reason is missing or unknown", () => {
+    for (const reason of [undefined, null, "", "something_new"]) {
+      expect(describeBodyUnreadable(body(reason))).toBe("本文を取り出せません（the server's sentence）");
+    }
+  });
+
+  it("falls back to the old sentence when there is no body item or no detail", () => {
+    expect(describeBodyUnreadable([])).toBe(BODY_UNREADABLE_TEXT);
+    expect(describeBodyUnreadable(undefined)).toBe(BODY_UNREADABLE_TEXT);
+    expect(describeBodyUnreadable(body("something_new", " "))).toBe(BODY_UNREADABLE_TEXT);
   });
 });

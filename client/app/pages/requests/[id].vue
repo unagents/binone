@@ -1,8 +1,8 @@
 <script setup lang="ts">
 import {
-  BODY_UNREADABLE_TEXT,
   canEditDraft,
   currentStep,
+  describeBodyUnreadable,
   describeMissingSource,
   formatDateTime,
   historySourceName,
@@ -29,6 +29,7 @@ const current = computed(() => currentStep(detail.value?.steps ?? []));
 const missing = computed(() => (detail.value?.missing_sources ?? []).map(describeMissingSource));
 const artifactMissing = computed(() => missingArtifactSources(detail.value?.missing_sources ?? []).map(describeMissingSource));
 const bodyUnreadable = computed(() => (detail.value ? isDetailBodyUnreadable(detail.value) : false));
+const bodyUnreadableText = computed(() => describeBodyUnreadable(detail.value?.missing_sources));
 const editable = computed(() => (detail.value ? canEditDraft(detail.value) : false));
 </script>
 
@@ -63,7 +64,7 @@ const editable = computed(() => (detail.value ? canEditDraft(detail.value) : fal
               <div><dt class="text-xs text-muted">更新</dt><dd class="text-default">{{ formatDateTime(detail.request.updated_ms) }}</dd></div>
             </dl>
             <div class="mt-4 border-t border-default pt-3 text-default" data-testid="request-body">
-              <p v-if="bodyUnreadable" class="text-sm text-warning" data-testid="body-unreadable">{{ BODY_UNREADABLE_TEXT }}</p>
+              <p v-if="bodyUnreadable" class="text-sm text-warning" data-testid="body-unreadable">{{ bodyUnreadableText }}</p>
               <MarkdownView v-else-if="detail.request.body" :source="detail.request.body" />
               <p v-else class="text-sm text-muted">（本文なし）</p>
             </div>

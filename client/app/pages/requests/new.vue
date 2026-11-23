@@ -1,10 +1,10 @@
 <script setup lang="ts">
 import { toApiError, type ApiError } from "~/utils/api/errors";
-import type { Request, ServerInfo } from "~/types/binone";
+import type { MissingSource, Request, ServerInfo } from "~/types/binone";
 import {
-  BODY_UNREADABLE_TEXT,
   addTag,
   baseFromRequest,
+  describeBodyUnreadable,
   emptyForm,
   formFromRequest,
   formatDateTime,
@@ -62,6 +62,9 @@ function apply(request: Request) {
 const info = ref<ServerInfo | null>(null);
 const storeText = computed(() => describeSaveTarget(info.value));
 const bodyUnreadable = computed(() => base.value?.bodyUnreadable === true);
+// Why the body cannot be read: asked of the status record, only when it cannot. Not getting it is not an error here.
+const bodySources = ref<MissingSource[]>([]);
+const bodyUnreadableText = computed(() => describeBodyUnreadable(bodySources.value));
 
 async function loadOptions() {
   optionsError.value = null;
@@ -85,7 +88,16 @@ async function loadOptions() {
 async function loadRequest(id: string) {
   loadError.value = null;
   try {
-    apply(await api.request(id));
+    const request = await api.request(id);
+    apply(request);
+    bodySources.value = [];
+    if (bodyUnreadable.value) {
+      try {
+        bodySources.value = (await api.requestDetail(id)).missing_sources;
+      } catch {
+        bodySources.value = [];
+      }
+    }
   } catch (e) {
     loadError.value = toApiError(e);
   }
@@ -97,6 +109,7 @@ async function loadAll(id: string | null) {
   Object.assign(form, emptyForm());
   savedForm.value = emptyForm();
   base.value = null;
+  bodySources.value = [];
   lane.value = "draft";
   savedAt.value = null;
   actionError.value = null;
@@ -305,7 +318,7 @@ async function createProject() {
               </UFormField>
             </div>
 
-            <UAlert v-if="bodyUnreadable" color="warning" variant="subtle" :title="BODY_UNREADABLE_TEXT" data-testid="body-unreadable">
+            <UAlert v-if="bodyUnreadable" color="warning" variant="subtle" :title="bodyUnreadableText" data-testid="body-unreadable">
               <template #description>
                 <p>本文は空ではなく、読めていません。題名と管理項目は編集して保存できます。保存しても本文は送らないので、今の本文は書き換わりません。</p>
               </template>

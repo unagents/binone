@@ -227,6 +227,11 @@ export interface MissingSource {
   service: ExternalServiceName;
   kind: ServerErrorKind;
   detail: string;
+  /**
+   * Why the body could not be read, only on the `body` item: `change_not_set`, `show_unsupported`,
+   * `not_found` or `unavailable`. Absent, or a value not known here, is shown with `detail`.
+   */
+  reason?: string | null;
 }
 
 export interface ExternalNote {

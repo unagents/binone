@@ -39,8 +39,28 @@ export function isDetailBodyUnreadable(detail: Pick<RequestDetail, "request" | "
   );
 }
 
-/** What is shown in place of a body that cannot be read (not an empty body). */
+/** What is shown in place of a body that cannot be read, when no reason is known (not an empty body). */
 export const BODY_UNREADABLE_TEXT = "本文を取り出せません（openspec-mcp に本文を読む口がありません）";
+
+const BODY_REASON_TEXT: Record<string, string> = {
+  change_not_set: "change が未記入のため、openspec-mcp から本文を読めません",
+  show_unsupported: "接続先の openspec-mcp が、本文を読む操作（show）に未対応です",
+  not_found: "openspec-mcp に、この依頼の本文が見つかりません",
+  unavailable: "openspec-mcp に届かないため、本文を読めません",
+};
+
+/**
+ * The sentence for a body that cannot be read, by the reason the server gives on the `body` item of
+ * `missing_sources`. No reason, or one not known here: "本文を取り出せません" with the server's `detail`
+ * (the old sentence when there is no `detail` either).
+ */
+export function describeBodyUnreadable(sources: readonly MissingSource[] | null | undefined): string {
+  const source = (sources ?? []).find((s) => s.item === "body");
+  const known = source?.reason ? BODY_REASON_TEXT[source.reason] : undefined;
+  if (known) return known;
+  const detail = source?.detail?.trim();
+  return detail ? `本文を取り出せません（${detail}）` : BODY_UNREADABLE_TEXT;
+}
 
 export function emptyForm(project = ""): DraftForm {
   return { title: "", body: "", project, kind: "", tags: [], protocol: "" };
