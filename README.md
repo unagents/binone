@@ -13,6 +13,7 @@ The user registers a request; binone carries it forward without further instruct
   - `scripts/release.sh`: pack the built app into a dmg, register the dmg, update the tap
 - `docs/assist.md`: the request-writing assistant (the chat on the right of the registration screen,
   held by the user's own `claude` CLI); the other request screens still show their chat pane as not connected
+- `docs/connection.md`: how the client gets a key and connects (first connection, changing the address, an invalid key)
 - `docs/release.md`: how to install the client with Homebrew and how to release it
 - `prototype/`: static HTML prototypes of the client screens (appearance only; dummy data).
   - `swimlane.html`: swimlane (kanban) of requests by lane

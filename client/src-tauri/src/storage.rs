@@ -41,6 +41,16 @@ pub fn load(path: &Path) -> Result<Option<(Endpoint, Option<String>)>, ConnectEr
     Ok(endpoint.map(|endpoint| (endpoint, key)))
 }
 
+/// Removes the saved address and key (the "start the connection over" action). Nothing saved is
+/// not an error.
+pub fn forget(path: &Path) -> Result<(), ConnectError> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == IoErrorKind::NotFound => Ok(()),
+        Err(e) => Err(storage_error("removing the settings file", e)),
+    }
+}
+
 /// Writes the endpoint and the key, then makes sure the file is readable by the user only.
 ///
 /// The contents go to a sibling file created with mode 0600 and are moved into place, so the

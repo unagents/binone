@@ -78,7 +78,7 @@ export function describeApiError(
   }
   switch (kind) {
     case "not_connected":
-      return { title: "サーバーに接続していません", description: "上の接続の表示から接続先を入れてください。" };
+      return { title: "サーバーに接続していません", description: "上の接続の表示から接続の画面を開いてください。" };
     case "not_found":
       return { title: "対象が見つかりませんでした", description: "削除されたか、番号が違います。一覧に戻って開き直してください。" };
     case "conflict":

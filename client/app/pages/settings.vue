@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import type { ApiError } from "~/utils/api/errors";
+import type { Failure } from "~/composables/useConnection";
 import { toApiError } from "~/utils/api/errors";
 import type { LaneDef, SettingsView } from "~/types/binone";
 import { MANUAL_COMMAND, canRunUpdate, finishedText, manualReason, manualReasonText, statusText } from "~/utils/update";
@@ -10,6 +11,37 @@ const finished = computed(() => (outcome.value?.state === "finished" ? outcome.v
 const canUpdate = computed(() => canRunUpdate(check.value, outcome.value));
 // Known from the check, so the way by hand is shown before "更新" is pressed (and in its place).
 const manual = computed(() => manualReason(check.value, outcome.value));
+
+const { connected, address, changeAddress, connect, forget } = useConnection();
+
+// The server's address: changed here with the key that is held. A server that does not accept
+// the key shows its notice (and only then the way to fetch the key again).
+const addressFailure = ref<Failure | null>(null);
+const addressChanged = ref(false);
+const reacquiringHere = ref(false);
+async function onChangeAddress(host: string, port: number | null) {
+  addressChanged.value = false;
+  const result = await changeAddress(host, port);
+  addressFailure.value = result.ok ? null : result.failure;
+  addressChanged.value = result.ok;
+}
+async function onReacquire(host: string, port: number | null) {
+  const result = await connect(host, port);
+  addressFailure.value = result.ok ? null : result.failure;
+  if (result.ok) {
+    reacquiringHere.value = false;
+    addressChanged.value = true;
+  }
+}
+const keyInvalid = computed(() => addressFailure.value?.error.kind === "unauthorized");
+
+const confirmingReset = ref(false);
+const resetError = ref<string>();
+async function onReset() {
+  const error = await forget();
+  resetError.value = error ? error.detail : undefined;
+  confirmingReset.value = false;
+}
 
 const api = useApi();
 const { data, error, loading, reload } = useScreenData(() => api.settings());
@@ -76,11 +108,50 @@ async function save() {
 </script>
 
 <template>
-  <ScreenFrame title="設定" description="レーンと種別の並びと追加。接続先の変更は、上の接続の表示から。">
+  <ScreenFrame title="設定" description="サーバーの address、レーンと種別の並びと追加。">
     <template #actions>
       <UButton color="neutral" variant="outline" size="sm" to="/projects">プロジェクト</UButton>
       <UButton color="neutral" variant="outline" size="sm" :loading="loading" @click="reload">読み込み直す</UButton>
     </template>
+
+    <UCard v-if="connected" id="server-address" class="scroll-mt-4" data-testid="address-card">
+      <template #header><h2 class="text-sm font-medium text-highlighted">server の address</h2></template>
+      <p class="mb-3 text-sm text-muted">
+        今の address: <span class="font-mono text-default" data-testid="current-address">{{ address(connected.host, connected.port) }}</span>
+      </p>
+      <div class="space-y-3">
+        <ConnectFailure v-if="addressFailure" :failure="addressFailure" />
+        <template v-if="keyInvalid && !reacquiringHere">
+          <UButton size="sm" data-testid="reacquire-key" @click="reacquiringHere = true">鍵を取り直す</UButton>
+        </template>
+        <p v-if="addressChanged" class="text-xs text-success" data-testid="address-changed">接続し直しました</p>
+        <AddressForm
+          v-if="reacquiringHere"
+          :key="`re:${addressFailure?.host}:${addressFailure?.port}`"
+          :initial-host="addressFailure?.host"
+          :initial-port="addressFailure?.port ?? null"
+          submit-label="鍵を取り直して接続"
+          :run="onReacquire"
+        />
+        <AddressForm
+          v-else
+          :initial-host="connected.host"
+          :initial-port="connected.port"
+          submit-label="この address に接続し直す"
+          :run="onChangeAddress"
+        />
+        <UButton v-if="reacquiringHere" color="neutral" variant="ghost" size="xs" @click="reacquiringHere = false">戻る</UButton>
+      </div>
+      <div class="mt-4 border-t border-default pt-2">
+        <div v-if="confirmingReset" class="flex flex-wrap items-center gap-2 text-xs" data-testid="reset-confirm">
+          <span class="text-muted">保存した address と鍵を消して、初回の画面に戻ります。</span>
+          <UButton size="xs" color="error" variant="soft" data-testid="reset-yes" @click="onReset">やり直す</UButton>
+          <UButton size="xs" color="neutral" variant="ghost" @click="confirmingReset = false">やめる</UButton>
+        </div>
+        <UButton v-else size="xs" color="neutral" variant="link" data-testid="reset-start" @click="confirmingReset = true">接続をやり直す</UButton>
+        <p v-if="resetError" class="text-xs text-error">{{ resetError }}</p>
+      </div>
+    </UCard>
 
     <UCard id="version" class="scroll-mt-4" data-testid="version-card">
       <template #header>
@@ -170,7 +241,6 @@ async function save() {
         <template #header><h2 class="text-sm font-medium text-highlighted">サーバーの設定（読み取りのみ）</h2></template>
         <dl class="grid grid-cols-[auto_1fr] gap-x-6 gap-y-1 text-sm" data-testid="server-settings">
           <dt class="text-muted">待ち受け port</dt><dd class="font-mono">{{ data.listen_port }}</dd>
-          <dt class="text-muted">鍵を渡す IP 範囲</dt><dd class="font-mono">{{ data.allowed_ranges.join(", ") || "なし" }}</dd>
           <dt class="text-muted">許可する origin</dt><dd class="font-mono">{{ data.allowed_origins.join(", ") || "なし" }}</dd>
           <dt class="text-muted">定期処理の間隔</dt><dd class="font-mono">{{ data.settings.scheduler_interval_secs }} 秒</dd>
         </dl>

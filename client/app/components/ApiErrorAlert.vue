@@ -3,7 +3,7 @@ import { describeApiError, pointsToConnection, type ApiError } from "~/utils/api
 
 // A failed call, in the connection screen's way: what happened, what to check, and the detail.
 const props = defineProps<{ error: ApiError; keepsInput?: boolean }>();
-const { connected, address } = useConnection();
+const { connected, address, askForKeyAgain } = useConnection();
 
 const message = computed(() => {
   const shown = connected.value ? address(connected.value.host, connected.value.port) : "";
@@ -18,7 +18,8 @@ const message = computed(() => {
       <p v-if="message.hint" class="mt-1">{{ message.hint }}</p>
       <p v-if="keepsInput" class="mt-1" data-testid="input-kept">入力した内容は、この画面に残っています（消していません）。</p>
       <p v-if="error.detail" class="mt-1 font-mono text-xs opacity-80">{{ error.detail }}</p>
-      <NuxtLink v-if="pointsToConnection(error.kind)" to="/connect" class="mt-2 inline-block underline">接続の画面を開く</NuxtLink>
+      <UButton v-if="error.kind === 'unauthorized'" class="mt-2" size="xs" color="error" variant="soft" data-testid="reacquire-from-error" @click="askForKeyAgain">鍵を取り直す</UButton>
+      <NuxtLink v-else-if="pointsToConnection(error.kind)" to="/connect" class="mt-2 inline-block underline">接続の画面を開く</NuxtLink>
     </template>
   </UAlert>
 </template>
