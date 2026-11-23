@@ -39,7 +39,7 @@ impl Endpoint {
         self.port.unwrap_or(DEFAULT_SERVER_PORT)
     }
 
-    fn url(&self, path: &str) -> String {
+    pub(crate) fn url(&self, path: &str) -> String {
         format!("http://{}:{}{}", self.host, self.port(), path)
     }
 }
@@ -77,7 +77,7 @@ impl ConnectError {
     }
 }
 
-fn client() -> Result<reqwest::Client, ConnectError> {
+pub(crate) fn client() -> Result<reqwest::Client, ConnectError> {
     reqwest::Client::builder()
         .connect_timeout(CONNECT_TIMEOUT)
         .timeout(REQUEST_TIMEOUT)
@@ -120,7 +120,7 @@ fn unexpected_status(what: &str, status: u16) -> ConnectError {
 
 /// The `Authorization` value for a key, or `None` when the key has a character that cannot be
 /// sent in a header (a line break or another control character).
-fn bearer(key: &str) -> Option<HeaderValue> {
+pub(crate) fn bearer(key: &str) -> Option<HeaderValue> {
     let mut value = HeaderValue::from_str(&format!("Bearer {key}")).ok()?;
     value.set_sensitive(true);
     Some(value)
@@ -246,8 +246,11 @@ pub(crate) mod testing {
         }
     }
 
-    /// Reads one request. Returns its head, or `None` when the client went away.
-    fn read_request(stream: &mut TcpStream) -> Option<String> {
+    /// What the stub received as bodies: one entry per request, in order.
+    pub type Bodies = Arc<Mutex<Vec<String>>>;
+
+    /// Reads one request. Returns its head and body, or `None` when the client went away.
+    fn read_request(stream: &mut TcpStream) -> Option<(String, String)> {
         let mut request = Vec::new();
         let mut buffer = [0u8; 4096];
         // Read the head, then as much body as Content-Length announces.
@@ -273,19 +276,30 @@ pub(crate) mod testing {
             }
             request.extend_from_slice(&buffer[..n]);
         }
-        Some(head)
+        let body = String::from_utf8_lossy(&request[head_end..]).to_string();
+        Some((head, body))
     }
 
     /// A one-thread HTTP stub. `answer` maps (path, authorization header) to the answer.
     pub fn stub<A: Into<Answer>>(answer: impl Fn(&str, Option<&str>) -> A + Send + 'static) -> (Endpoint, Seen) {
+        let (endpoint, seen, _) = stub_with_bodies(move |path, authorization, _| answer(path, authorization));
+        (endpoint, seen)
+    }
+
+    /// Like `stub`, and `answer` also gets the request's body; the bodies are returned too.
+    pub fn stub_with_bodies<A: Into<Answer>>(
+        answer: impl Fn(&str, Option<&str>, &str) -> A + Send + 'static,
+    ) -> (Endpoint, Seen, Bodies) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         let seen: Seen = Arc::default();
+        let bodies: Bodies = Arc::default();
         let log = seen.clone();
+        let body_log = bodies.clone();
         std::thread::spawn(move || {
             for stream in listener.incoming() {
                 let Ok(mut stream) = stream else { continue };
-                let Some(head) = read_request(&mut stream) else { continue };
+                let Some((head, body)) = read_request(&mut stream) else { continue };
                 let mut first = head.lines().next().unwrap_or("").split(' ');
                 let method = first.next().unwrap_or("").to_owned();
                 let path = first.next().unwrap_or("").to_owned();
@@ -294,7 +308,8 @@ pub(crate) mod testing {
                     .find(|l| l.to_ascii_lowercase().starts_with("authorization:"))
                     .map(|l| l["authorization:".len()..].trim().to_owned());
                 log.lock().unwrap().push(format!("{method} {path} {}", authorization.as_deref().unwrap_or("-")));
-                let Answer { status, body, location } = answer(&path, authorization.as_deref()).into();
+                body_log.lock().unwrap().push(body.clone());
+                let Answer { status, body, location } = answer(&path, authorization.as_deref(), &body).into();
                 let location = location.map(|l| format!("Location: {l}\r\n")).unwrap_or_default();
                 let response = format!(
                     "HTTP/1.1 {status} X\r\n{location}Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
@@ -303,7 +318,7 @@ pub(crate) mod testing {
                 let _ = stream.write_all(response.as_bytes());
             }
         });
-        (Endpoint { host: Ipv4Addr::LOCALHOST, port: Some(port) }, seen)
+        (Endpoint { host: Ipv4Addr::LOCALHOST, port: Some(port) }, seen, bodies)
     }
 
     /// A server that follows the contract and accepts only `valid_key`.

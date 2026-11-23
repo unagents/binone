@@ -1,6 +1,7 @@
 //! The binone client's native side: it stores the server's address and the key, and talks to
 //! the server. The webview only calls the commands below; it never sees the key.
 
+mod api;
 mod server;
 mod storage;
 
@@ -8,7 +9,7 @@ use std::net::Ipv4Addr;
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Manager, State};
 
 use server::{ConnectError, Endpoint, ErrorKind, DEFAULT_SERVER_PORT};
 
@@ -104,9 +105,23 @@ async fn restore(app: AppHandle) -> Restored {
     }
 }
 
+/// The webview's only way to the server's GraphQL: an operation name from the allowlist in
+/// `api::ops` and its arguments. The address, the key and the document stay on this side.
+#[tauri::command]
+async fn api_call(
+    app: AppHandle,
+    gateway: State<'_, api::Gateway>,
+    op: String,
+    args: Option<serde_json::Value>,
+) -> Result<serde_json::Value, api::ApiError> {
+    let settings = settings_path(&app)?;
+    gateway.call(&settings, &op, args).await
+}
+
 pub fn run() {
     tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![default_port, connect, restore])
+        .manage(api::Gateway::default())
+        .invoke_handler(tauri::generate_handler![default_port, connect, restore, api_call])
         .run(tauri::generate_context!())
         .expect("error while running the binone client");
 }
