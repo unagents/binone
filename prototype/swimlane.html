@@ -1,0 +1,712 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>スイムレーン prototype</title>
+<style>
+  /* 配色・寸法は Cork（https://github.com/koki-develop/Cork）の src/style.css と各コンポーネントに合わせる */
+  :root {
+    color-scheme: dark;
+    --cork-bg: #020617;
+    --cork-surface: #0f172a;
+    --cork-elevated: #1e293b;
+    --cork-border: #334155;
+    --cork-muted: #94a3b8;
+    --cork-text: #f1f5f9;
+    --cork-accent: #6366f1;
+    --cork-accent-hover: #818cf8;
+
+    --border-30: color-mix(in oklab, var(--cork-border) 30%, transparent);
+    --border-40: color-mix(in oklab, var(--cork-border) 40%, transparent);
+    --border-50: color-mix(in oklab, var(--cork-border) 50%, transparent);
+    --border-60: color-mix(in oklab, var(--cork-border) 60%, transparent);
+    --surface-60: color-mix(in oklab, var(--cork-surface) 60%, transparent);
+    --elevated-60: color-mix(in oklab, var(--cork-elevated) 60%, transparent);
+    --elevated-80: color-mix(in oklab, var(--cork-elevated) 80%, transparent);
+    --accent-10: color-mix(in oklab, var(--cork-accent) 10%, transparent);
+    --accent-25: color-mix(in oklab, var(--cork-accent) 25%, transparent);
+    --accent-50: color-mix(in oklab, var(--cork-accent) 50%, transparent);
+    --accent-hover-80: color-mix(in oklab, var(--cork-accent-hover) 80%, transparent);
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    font-family: "Inter Variable", "Inter", ui-sans-serif, system-ui, -apple-system, "Hiragino Sans", "Noto Sans JP", sans-serif;
+    color: var(--cork-text);
+    background: var(--cork-bg);
+    -webkit-font-smoothing: antialiased;
+  }
+  h1, h2, h3, p { margin: 0; }
+  svg { display: block; flex-shrink: 0; }
+
+  /* ヘッダー（Cork の AppHeader） */
+  .app-header {
+    display: flex;
+    flex-shrink: 0;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    padding: 12px 24px;
+    border-bottom: 1px solid var(--border-50);
+  }
+  .header-left { display: flex; align-items: center; gap: 16px; min-width: 0; }
+  .app-title { font-size: 14px; line-height: 20px; font-weight: 600; white-space: nowrap; }
+  .mono {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 12px;
+    line-height: 16px;
+    color: var(--cork-muted);
+    white-space: nowrap;
+  }
+  .muted-xs { font-size: 12px; line-height: 16px; color: var(--cork-muted); white-space: nowrap; }
+
+  /* ツールバー（ヘッダー直下・スイムレーン直上） */
+  .toolbar {
+    display: flex;
+    flex-shrink: 0;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 12px 16px;
+    padding: 24px 24px 0;
+  }
+  .toolbar-group { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; }
+  .spacer { flex: 1; }
+  .field {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 14px;
+    line-height: 20px;
+    color: var(--cork-muted);
+    white-space: nowrap;
+  }
+
+  /* 選択欄（Cork の Select） */
+  select {
+    appearance: none;
+    padding: 6px 32px 6px 12px;
+    font: inherit;
+    color: var(--cork-text);
+    background: var(--elevated-60) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%2394a3b8' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E") no-repeat right 10px center / 16px 16px;
+    border: 1px solid var(--border-40);
+    border-radius: 8px;
+    cursor: pointer;
+  }
+  select:disabled { opacity: 0.4; cursor: default; }
+
+  /* 表示レーンのボタン（Cork の FilterButton）とポップオーバー */
+  .popover-wrap { position: relative; }
+  .filter-button {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    height: 32px;
+    padding: 0 12px;
+    font: inherit;
+    font-size: 12px;
+    line-height: 16px;
+    color: var(--cork-muted);
+    background: var(--elevated-60);
+    border: 1px solid var(--border-40);
+    border-radius: 8px;
+    cursor: pointer;
+    transition: background-color 0.2s, border-color 0.2s;
+  }
+  .filter-button:hover { background: var(--cork-elevated); border-color: var(--border-60); }
+  .filter-button.active { color: var(--cork-text); border-color: var(--accent-50); }
+  .filter-button svg { width: 14px; height: 14px; }
+  .filter-button .count {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 16px;
+    height: 16px;
+    margin-left: 4px;
+    padding: 0 4px;
+    font-size: 10px;
+    line-height: 1;
+    font-weight: 500;
+    color: #ffffff;
+    background: var(--cork-accent);
+    border-radius: 9999px;
+  }
+  .filter-button .count[hidden] { display: none; }
+  .popover {
+    position: absolute;
+    top: calc(100% + 8px);
+    right: 0;
+    z-index: 10;
+    min-width: 168px;
+    padding: 4px;
+    background: var(--cork-elevated);
+    border: 1px solid var(--border-40);
+    border-radius: 8px;
+    box-shadow: 0 20px 25px -5px rgb(0 0 0 / 0.1), 0 8px 10px -6px rgb(0 0 0 / 0.1);
+  }
+  .popover[hidden] { display: none; }
+  .popover-left { right: auto; left: 0; }
+  .popover-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 12px;
+    font-size: 14px;
+    line-height: 20px;
+    color: var(--cork-text);
+    border-radius: 6px;
+    cursor: pointer;
+  }
+  .popover-row:hover { background: var(--border-40); }
+  .popover-row input { margin: 0; accent-color: var(--cork-accent); }
+  .popover-row.disabled { cursor: default; opacity: 0.5; }
+  .popover-row.disabled:hover { background: transparent; }
+
+  /* スイムレーン（Cork の BoardLayout / KanbanColumn / KanbanCard） */
+  .board {
+    display: flex;
+    flex: 1;
+    gap: 20px;
+    min-height: 0;
+    padding: 24px;
+    overflow-x: auto;
+    overflow-y: hidden;
+  }
+  .column {
+    display: flex;
+    flex-direction: column;
+    flex-shrink: 0;
+    width: 320px;
+    max-height: 100%;
+    min-height: 0;
+    background: var(--surface-60);
+    border: 1px solid var(--border-40);
+    border-radius: 12px;
+  }
+  .column-head {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 12px 16px;
+    border-bottom: 1px solid var(--border-40);
+  }
+  .column-title {
+    min-width: 0;
+    overflow: hidden;
+    font-size: 14px;
+    line-height: 20px;
+    font-weight: 600;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .badge {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 20px;
+    height: 20px;
+    margin-left: auto;
+    font-size: 12px;
+    line-height: 16px;
+    font-weight: 500;
+    color: var(--cork-muted);
+    background: var(--cork-elevated);
+    border-radius: 6px;
+  }
+  /* レーン見出しの非表示ボタン（大きさは Cork の DragHandle、配色は IconButton の ghost） */
+  .icon-button {
+    display: inline-flex;
+    flex-shrink: 0;
+    align-items: center;
+    justify-content: center;
+    width: 20px;
+    height: 20px;
+    padding: 0;
+    color: var(--cork-muted);
+    background: transparent;
+    border: 0;
+    border-radius: 4px;
+    cursor: pointer;
+    transition: background-color 0.2s, color 0.2s;
+  }
+  .icon-button:hover { color: var(--cork-text); background: var(--cork-elevated); }
+  .icon-button svg { width: 14px; height: 14px; }
+  /* ＋ボタン（Cork の KanbanColumn: Button の dashed / sm） */
+  .add-row { flex-shrink: 0; padding: 12px 12px 0; }
+  .add-button {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 100%;
+    padding: 6px;
+    color: var(--cork-muted);
+    background: transparent;
+    border: 1px dashed var(--border-40);
+    border-radius: 8px;
+    cursor: pointer;
+    transition: background-color 0.2s, border-color 0.2s, color 0.2s;
+  }
+  .add-button:hover {
+    color: var(--cork-text);
+    background: color-mix(in oklab, var(--cork-elevated) 50%, transparent);
+    border-color: var(--cork-border);
+  }
+  .add-button svg { width: 14px; height: 14px; }
+  .column-body {
+    display: flex;
+    flex: 1;
+    flex-direction: column;
+    gap: 8px;
+    min-height: 96px;
+    padding: 12px;
+    overflow-y: auto;
+  }
+  .group { display: flex; flex-direction: column; gap: 8px; }
+  .group + .group { margin-top: 12px; }
+  .group-head {
+    padding: 0 2px;
+    font-size: 12px;
+    line-height: 16px;
+    font-weight: 500;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    color: var(--cork-muted);
+  }
+  .card {
+    padding: 14px;
+    background: var(--elevated-80);
+    border: 1px solid var(--border-30);
+    border-radius: 12px;
+    user-select: none;
+    transition: background-color 0.2s, border-color 0.2s;
+  }
+  .card:hover { background: var(--cork-elevated); border-color: var(--cork-border); }
+  .card-title {
+    display: -webkit-box;
+    overflow: hidden;
+    font-size: 14px;
+    line-height: 1.375;
+    font-weight: 500;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+  }
+  .card-meta {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    min-width: 0;
+    margin-top: 8px;
+    font-size: 12px;
+    line-height: 16px;
+    color: var(--cork-muted);
+  }
+  .card-meta svg { width: 12px; height: 12px; }
+  .card-meta span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .card-meta + .card-meta { margin-top: 4px; }
+  .tag-list { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; margin-top: 8px; }
+  .tag {
+    display: inline-flex;
+    align-items: center;
+    height: 20px;
+    max-width: 140px;
+    padding: 0 8px;
+    overflow: hidden;
+    font-size: 12px;
+    line-height: 16px;
+    color: var(--accent-hover-80);
+    white-space: nowrap;
+    background: var(--accent-10);
+    border: 1px solid var(--accent-25);
+    border-radius: 9999px;
+  }
+  .card-body {
+    display: -webkit-box;
+    overflow: hidden;
+    margin-top: 6px;
+    font-size: 12px;
+    line-height: 1.625;
+    color: var(--cork-muted);
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+  }
+  .empty { font-size: 14px; color: var(--cork-muted); }
+</style>
+</head>
+<body>
+  <header class="app-header">
+    <div class="header-left">
+      <h1 class="app-title">スイムレーン</h1>
+      <span class="mono">prototype・ダミーデータ</span>
+      <label class="field">プロジェクト
+        <select id="project"><option value="">すべて</option></select>
+      </label>
+    </div>
+    <span id="task-count" class="muted-xs"></span>
+  </header>
+
+  <div class="toolbar">
+    <div class="toolbar-group">
+      <div class="popover-wrap">
+        <button id="kind-button" class="filter-button" type="button" aria-expanded="false" aria-haspopup="dialog">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 6h18"/><path d="M7 12h10"/><path d="M10 18h4"/></svg>
+          <span>種別</span>
+          <span class="count" hidden></span>
+        </button>
+        <div id="kind-popover" class="popover popover-left" hidden></div>
+      </div>
+      <div class="popover-wrap">
+        <button id="tag-button" class="filter-button" type="button" aria-expanded="false" aria-haspopup="dialog">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 6h18"/><path d="M7 12h10"/><path d="M10 18h4"/></svg>
+          <span>タグ</span>
+          <span class="count" hidden></span>
+        </button>
+        <div id="tag-popover" class="popover popover-left" hidden></div>
+      </div>
+    </div>
+    <span class="spacer"></span>
+    <div class="toolbar-group">
+      <label class="field">グループ
+        <select id="group">
+          <option value="">なし</option>
+          <option value="project">プロジェクト毎</option>
+          <option value="kind">種別毎</option>
+        </select>
+      </label>
+      <label class="field">ソート
+        <select id="sort">
+          <option value="">なし</option>
+          <option value="project">プロジェクト名</option>
+          <option value="updatedAt">更新日時</option>
+        </select>
+        <select id="order" disabled>
+          <option value="asc">昇順</option>
+          <option value="desc">降順</option>
+        </select>
+      </label>
+      <div class="popover-wrap">
+        <button id="lanes-button" class="filter-button" type="button" aria-expanded="false" aria-haspopup="dialog">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect width="18" height="18" x="3" y="3" rx="2"/><path d="M9 3v18"/><path d="M15 3v18"/></svg>
+          <span>表示レーン</span>
+        </button>
+        <div id="lanes-popover" class="popover" hidden></div>
+      </div>
+    </div>
+  </div>
+
+  <main id="board" class="board"></main>
+
+<script>
+  // レーン定義。配列に要素を足すとレーンが増える。
+  const LANES = ["draft", "todo", "prepare", "doing", "done", "archive"];
+
+  // 非表示にできないレーン（目のアイコンを置かない）と、＋ボタンを置くレーン
+  const ALWAYS_VISIBLE_LANE = "draft";
+  const ADD_LANE = "draft";
+
+  // ダミーデータ
+  const TASKS = [
+    { title: "検索APIの調査", project: "プロジェクトA", kind: "調査", tags: ["API"], status: "draft",
+      updatedAt: "2026-11-22T18:05", body: "## 目的\n検索APIの候補を3つ比較し、応答速度と費用を表にまとめる。" },
+    { title: "ログイン画面の改修", project: "プロジェクトB", kind: "実装", tags: ["UI", "急ぎ"], status: "draft",
+      updatedAt: "2026-11-21T09:40", body: "## 内容\nエラー表示の位置を入力欄の直下に移す。文言は既存のものを使う。" },
+    { title: "DB設計の見直し", project: "プロジェクトC", kind: "レビュー", tags: ["DB"], status: "todo",
+      updatedAt: "2026-11-20T15:12", body: "## 背景\nタスク表の項目が増えたため、正規化の方針を見直す。" },
+    { title: "一覧画面のページング", project: "プロジェクトA", kind: "実装", tags: ["UI"], status: "todo",
+      updatedAt: "2026-11-22T10:30", body: "## 内容\n一覧を50件ずつ表示し、次へ・前へで切り替える。" },
+    { title: "通知機能の要件整理", project: "プロジェクトB", kind: "調査", tags: ["API", "急ぎ"], status: "todo",
+      updatedAt: "2026-11-19T11:00", body: "## 目的\n通知の種類と送信のタイミングを洗い出す。" },
+    { title: "認証フローの提案", project: "プロジェクトA", kind: "調査", tags: ["API"], status: "prepare",
+      updatedAt: "2026-11-21T16:45", body: "## 提案\nトークンの有効期限と再発行の流れを図にして提案する。" },
+    { title: "ダッシュボードの配置案", project: "プロジェクトC", kind: "実装", tags: ["UI"], status: "prepare",
+      updatedAt: "2026-11-18T13:20", body: "## 内容\n主要な指標4つを上段に並べる案を作る。" },
+    { title: "バッチ処理の実装", project: "プロジェクトB", kind: "実装", tags: ["DB"], status: "doing",
+      updatedAt: "2026-11-22T21:10", body: "## 内容\n夜間に集計を走らせ、結果を集計表へ書き込む。" },
+    { title: "API仕様書の更新", project: "プロジェクトA", kind: "レビュー", tags: ["API"], status: "doing",
+      updatedAt: "2026-11-20T09:05", body: "## 内容\n追加したエンドポイント2本を仕様書に反映する。" },
+    { title: "検索UIの調整", project: "プロジェクトC", kind: "実装", tags: ["UI", "急ぎ"], status: "doing",
+      updatedAt: "2026-11-23T08:50", body: "## 内容\n検索結果の強調表示とキーボード操作を直す。" },
+    { title: "ログ出力の整理", project: "プロジェクトB", kind: "レビュー", tags: ["DB"], status: "done",
+      updatedAt: "2026-11-17T17:30", body: "## 内容\nログの出力先とレベルを統一した。" },
+    { title: "初期データ投入", project: "プロジェクトA", kind: "実装", tags: ["DB"], status: "done",
+      updatedAt: "2026-11-16T12:00", body: "## 内容\nマスタデータを本番環境へ投入した。" },
+    { title: "旧画面の削除", project: "プロジェクトC", kind: "実装", tags: ["UI"], status: "archive",
+      updatedAt: "2026-11-10T10:00", body: "## 内容\n使われなくなった旧設定画面を削除した。" },
+    { title: "技術選定メモ", project: "プロジェクトA", kind: "調査", tags: ["API", "DB"], status: "archive",
+      updatedAt: "2026-11-05T19:25", body: "## 結論\nフロントは既存の構成を維持する。" },
+  ];
+
+  const FOLDER_ICON =
+    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
+    '<path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/></svg>';
+
+  const EYE_ICON =
+    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
+    '<path d="M2.062 12.348a1 1 0 0 1 0-.696 10.75 10.75 0 0 1 19.876 0 1 1 0 0 1 0 .696 10.75 10.75 0 0 1-19.876 0"/>' +
+    '<circle cx="12" cy="12" r="3"/></svg>';
+
+  const PLUS_ICON =
+    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
+    '<path d="M5 12h14"/><path d="M12 5v14"/></svg>';
+
+  const CLOCK_ICON =
+    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
+    '<circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>';
+
+  const state = {
+    project: "", // プロジェクトは1つだけ選ぶ
+    kinds: new Set(), // 種別は複数選べる
+    tags: new Set(), // タグは複数選べる
+    group: "",
+    sort: "",
+    order: "asc",
+    visible: new Set(LANES),
+  };
+
+  const $ = (id) => document.getElementById(id);
+  const byJa = (a, b) => a.localeCompare(b, "ja");
+  const uniq = (values) => [...new Set(values)].sort(byJa);
+
+  // ソートに使える項目。項目を増やす時はここに足す
+  const SORTERS = {
+    project: (a, b) => byJa(a.project, b.project),
+    updatedAt: (a, b) => a.updatedAt.localeCompare(b.updatedAt),
+  };
+
+  // "2026-11-22T18:05" を "11/22 18:05" にする
+  function formatDate(iso) {
+    const [date, time] = iso.split("T");
+    const [, month, day] = date.split("-");
+    return `${Number(month)}/${Number(day)} ${time}`;
+  }
+
+  function el(tag, className, text) {
+    const node = document.createElement(tag);
+    if (className) node.className = className;
+    if (text != null) node.textContent = text;
+    return node;
+  }
+
+  function addOptions(select, values) {
+    for (const value of values) {
+      const option = el("option", "", value);
+      option.value = value;
+      select.append(option);
+    }
+  }
+
+  addOptions($("project"), uniq(TASKS.map((t) => t.project)));
+  $("task-count").textContent = `${TASKS.length} 件`;
+
+  // ポップオーバー（ボタンで開閉。外側をクリックすると閉じる）
+  const popovers = [];
+  function closePopovers() {
+    for (const { button, popover } of popovers) {
+      popover.hidden = true;
+      button.setAttribute("aria-expanded", "false");
+    }
+  }
+  function setupPopover(buttonId, popoverId) {
+    const button = $(buttonId);
+    const popover = $(popoverId);
+    popovers.push({ button, popover });
+    button.addEventListener("click", () => {
+      const open = popover.hidden;
+      closePopovers();
+      popover.hidden = !open;
+      button.setAttribute("aria-expanded", String(open));
+    });
+    return popover;
+  }
+  document.addEventListener("click", (event) => {
+    if (!event.target.closest(".popover-wrap")) closePopovers();
+  });
+
+  function addCheckRow(popover, label, checked, onChange) {
+    const row = el("label", "popover-row");
+    const box = document.createElement("input");
+    box.type = "checkbox";
+    box.checked = checked;
+    box.addEventListener("change", () => onChange(box.checked));
+    row.append(box, el("span", "", label));
+    popover.append(row);
+    return { row, box };
+  }
+
+  // 種別・タグの絞り込み（複数選べる）
+  function setupMultiFilter(buttonId, popoverId, values, selected) {
+    const popover = setupPopover(buttonId, popoverId);
+    for (const value of values) {
+      addCheckRow(popover, value, false, (checked) => {
+        if (checked) selected.add(value);
+        else selected.delete(value);
+        render();
+      });
+    }
+  }
+  setupMultiFilter("kind-button", "kind-popover", uniq(TASKS.map((t) => t.kind)), state.kinds);
+  setupMultiFilter("tag-button", "tag-popover", uniq(TASKS.flatMap((t) => t.tags)), state.tags);
+
+  // 選んだ数を Cork の FilterButton と同じ丸い数字で出す
+  function updateFilterButton(buttonId, selected) {
+    const button = $(buttonId);
+    const count = button.querySelector(".count");
+    button.classList.toggle("active", selected.size > 0);
+    count.hidden = selected.size === 0;
+    count.textContent = String(selected.size);
+  }
+
+  // 表示レーン
+  const lanesPopover = setupPopover("lanes-button", "lanes-popover");
+  const laneBoxes = new Map();
+  for (const lane of LANES) {
+    const { row, box } = addCheckRow(lanesPopover, lane, true, (checked) => {
+      if (checked) state.visible.add(lane);
+      else state.visible.delete(lane);
+      render();
+    });
+    if (lane === ALWAYS_VISIBLE_LANE) {
+      box.disabled = true;
+      row.classList.add("disabled");
+    }
+    laneBoxes.set(lane, box);
+  }
+
+  for (const id of ["project", "group", "sort", "order"]) {
+    $(id).addEventListener("change", (event) => {
+      state[id] = event.target.value;
+      $("order").disabled = !state.sort;
+      render();
+    });
+  }
+
+  // 非表示レーンのタスクは、手前で一番近い表示中レーンに出す。
+  // 先頭の draft は非表示にできないため、必ずどこかのレーンに出る。
+  function displayLane(status) {
+    for (let i = LANES.indexOf(status); i >= 0; i--) {
+      if (state.visible.has(LANES[i])) return LANES[i];
+    }
+    return null;
+  }
+
+  // グループはプロジェクト毎か種別毎
+  function groupKey(task) {
+    return state.group === "project" ? task.project : task.kind;
+  }
+
+  // カード（Cork の KanbanCard。日付の位置にプロジェクト・種別と更新日時を出す）
+  function cardOf(task) {
+    const card = el("div", "card");
+    card.append(el("h3", "card-title", task.title));
+
+    const meta = el("div", "card-meta");
+    meta.insertAdjacentHTML("beforeend", FOLDER_ICON);
+    meta.append(el("span", "", `${task.project} ・ ${task.kind}`));
+    card.append(meta);
+
+    const updated = el("div", "card-meta");
+    updated.insertAdjacentHTML("beforeend", CLOCK_ICON);
+    updated.append(el("span", "", `更新 ${formatDate(task.updatedAt)}`));
+    card.append(updated);
+
+    if (task.tags.length > 0) {
+      const list = el("div", "tag-list");
+      for (const tag of task.tags.slice(0, 3)) list.append(el("span", "tag", tag));
+      if (task.tags.length > 3) list.append(el("span", "tag", `+${task.tags.length - 3}`));
+      card.append(list);
+    }
+
+    const preview = task.body.length > 100 ? task.body.slice(0, 100).trimEnd() + "…" : task.body.trim();
+    if (preview) card.append(el("p", "card-body", preview));
+    return card;
+  }
+
+  function render() {
+    const board = $("board");
+    board.textContent = "";
+
+    const lanes = LANES.filter((lane) => state.visible.has(lane));
+    $("lanes-button").classList.toggle("active", lanes.length !== LANES.length);
+    for (const [lane, box] of laneBoxes) box.checked = state.visible.has(lane);
+    updateFilterButton("kind-button", state.kinds);
+    updateFilterButton("tag-button", state.tags);
+    if (lanes.length === 0) {
+      board.append(el("p", "empty", "表示中のレーンがありません"));
+      return;
+    }
+
+    // 種別・タグは選んだ値のどれかに当てはまれば出す。プロジェクト・種別・タグどうしは「かつ」で重ねる
+    let tasks = TASKS.filter((t) =>
+      (!state.project || t.project === state.project) &&
+      (state.kinds.size === 0 || state.kinds.has(t.kind)) &&
+      (state.tags.size === 0 || t.tags.some((tag) => state.tags.has(tag))));
+    if (state.sort) {
+      const dir = state.order === "asc" ? 1 : -1;
+      tasks = [...tasks].sort((a, b) => dir * SORTERS[state.sort](a, b));
+    }
+
+    const byLane = new Map(lanes.map((lane) => [lane, []]));
+    for (const task of tasks) {
+      const lane = displayLane(task.status);
+      if (lane) byLane.get(lane).push(task);
+    }
+
+    for (const lane of lanes) {
+      const laneTasks = byLane.get(lane);
+      const column = el("section", "column");
+      const head = el("div", "column-head");
+      head.append(el("h2", "column-title", lane), el("span", "badge", String(laneTasks.length)));
+      // 見出しの目のアイコンで、このレーンを非表示にする（非表示にできないレーンには置かない）
+      if (lane !== ALWAYS_VISIBLE_LANE) {
+        const hide = el("button", "icon-button");
+        hide.type = "button";
+        hide.title = "非表示にする";
+        hide.setAttribute("aria-label", `${lane} を非表示`);
+        hide.insertAdjacentHTML("beforeend", EYE_ICON);
+        hide.addEventListener("click", () => {
+          state.visible.delete(lane);
+          render();
+        });
+        head.append(hide);
+      }
+
+      const body = el("div", "column-body");
+      if (state.group) {
+        // グループは列の中で見出しを付けて区切る
+        const groups = new Map();
+        for (const task of laneTasks) {
+          const key = groupKey(task);
+          if (!groups.has(key)) groups.set(key, []);
+          groups.get(key).push(task);
+        }
+        for (const key of [...groups.keys()].sort(byJa)) {
+          const group = el("div", "group");
+          group.append(el("div", "group-head", key), ...groups.get(key).map(cardOf));
+          body.append(group);
+        }
+      } else {
+        body.append(...laneTasks.map(cardOf));
+      }
+
+      column.append(head);
+      // ＋ボタンはカード一覧の上に置く（Cork の KanbanColumn と同じ位置）
+      if (lane === ADD_LANE) {
+        const row = el("div", "add-row");
+        const add = el("button", "add-button");
+        add.type = "button";
+        add.setAttribute("aria-label", "追加");
+        add.insertAdjacentHTML("beforeend", PLUS_ICON);
+        row.append(add);
+        column.append(row);
+      }
+      column.append(body);
+      board.append(column);
+    }
+  }
+
+  render();
+</script>
+</body>
+</html>

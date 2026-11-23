@@ -1,0 +1,375 @@
+<!DOCTYPE html>
+<!--
+  状況の通知（prototype 3案から採用した案B の出方と大きさ。出す場所は右上で、上から下へ積む）。
+  prototype のファイルは削除済み（git の履歴に残る）。
+  bantou セッションから通知を受けると、帯状の時限モーダルが出て、発信元のセッション名と概要の一部を薄く出し、時間切れで消える。
+  同時に複数届いた時は、それぞれが時間切れで消える。一覧は「通知」ボタンから開く。
+  下の黄色い帯は通知を真似て出すためのデモ用（デザインの一部ではない）。
+  後ろの画面は、スイムレーンに似せた静的な見本（Obsidian の中では、この画面の内側から vault の別のファイルを読めないため）。
+  データはダミー。保存しない。配色は Cork（https://github.com/koki-develop/Cork）に合わせる。
+-->
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>状況の通知</title>
+<style>
+  :root {
+    color-scheme: dark;
+    --cork-bg: #020617;
+    --cork-surface: #0f172a;
+    --cork-elevated: #1e293b;
+    --cork-border: #334155;
+    --cork-muted: #94a3b8;
+    --cork-text: #f1f5f9;
+    --cork-accent: #6366f1;
+    --cork-accent-hover: #818cf8;
+    --cork-warning: #fbbf24;
+
+    --border-40: color-mix(in oklab, var(--cork-border) 40%, transparent);
+    --border-50: color-mix(in oklab, var(--cork-border) 50%, transparent);
+    --elevated-60: color-mix(in oklab, var(--cork-elevated) 60%, transparent);
+    --accent-20: color-mix(in oklab, var(--cork-accent) 20%, transparent);
+    --accent-40: color-mix(in oklab, var(--cork-accent) 40%, transparent);
+    --warning-15: color-mix(in oklab, var(--cork-warning) 15%, transparent);
+    --warning-40: color-mix(in oklab, var(--cork-warning) 40%, transparent);
+    --faint-text: color-mix(in oklab, var(--cork-text) 70%, transparent);
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    font-family: "Inter Variable", "Inter", ui-sans-serif, system-ui, -apple-system, "Hiragino Sans", "Noto Sans JP", sans-serif;
+    color: var(--cork-text);
+    background: var(--cork-bg);
+    -webkit-font-smoothing: antialiased;
+  }
+  h2, p { margin: 0; }
+  button { font: inherit; }
+
+  /* アプリ全体の上の帯（binone のクライアント） */
+  .app-bar {
+    position: relative;
+    z-index: 30;
+    display: flex;
+    flex-shrink: 0;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    height: 44px;
+    padding: 0 16px;
+    background: var(--cork-bg);
+    border-bottom: 1px solid var(--border-50);
+  }
+  .brand { display: flex; align-items: center; gap: 12px; }
+  .brand-name { font-size: 14px; font-weight: 700; }
+  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; color: var(--cork-muted); white-space: nowrap; }
+
+  /* 後ろの画面（スイムレーンに似せた静的な見本） */
+  .host { display: flex; flex: 1; flex-direction: column; min-height: 0; overflow: hidden; }
+  .bd-header { display: flex; align-items: center; gap: 12px; padding: 12px 24px; border-bottom: 1px solid var(--border-50); }
+  .bd-title { font-size: 14px; font-weight: 600; }
+  .bd-board { display: flex; flex: 1; gap: 20px; min-height: 0; padding: 24px; overflow: hidden; }
+  .bd-col {
+    display: flex;
+    flex-direction: column;
+    flex-shrink: 0;
+    gap: 8px;
+    width: 260px;
+    padding: 0 12px 12px;
+    background: color-mix(in oklab, var(--cork-surface) 60%, transparent);
+    border: 1px solid var(--border-40);
+    border-radius: 12px;
+  }
+  .bd-col-head { display: flex; justify-content: space-between; margin: 0 -12px 4px; padding: 12px 16px; font-size: 14px; font-weight: 600; border-bottom: 1px solid var(--border-40); }
+  .bd-col-head span { font-size: 12px; font-weight: 500; color: var(--cork-muted); }
+  .bd-card { padding: 14px; font-size: 14px; font-weight: 500; background: color-mix(in oklab, var(--cork-elevated) 80%, transparent); border: 1px solid color-mix(in oklab, var(--cork-border) 30%, transparent); border-radius: 12px; }
+  .bd-card small { display: block; margin-top: 6px; font-size: 12px; font-weight: 400; color: var(--cork-muted); }
+
+  /* 通知を重ねる層 */
+  .overlay { position: fixed; inset: 44px 0 0 0; z-index: 20; pointer-events: none; }
+
+  .bell {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    height: 30px;
+    padding: 0 10px;
+    font-size: 12px;
+    color: var(--cork-muted);
+    background: var(--elevated-60);
+    border: 1px solid var(--border-40);
+    border-radius: 8px;
+    cursor: pointer;
+  }
+  .bell:hover { color: var(--cork-text); }
+  .count {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 16px;
+    height: 16px;
+    padding: 0 4px;
+    font-size: 10px;
+    font-weight: 600;
+    color: #ffffff;
+    background: var(--cork-accent);
+    border-radius: 9999px;
+  }
+  .count[hidden] { display: none; }
+
+  /* 帯（時限モーダル）。右上から下へ積む。中身は薄く出す */
+  .stack {
+    position: absolute;
+    top: 12px;
+    right: 16px;
+    z-index: 1;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    width: min(380px, calc(100% - 32px));
+  }
+  .band {
+    position: relative;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    min-width: 0;
+    padding: 10px 16px;
+    overflow: hidden;
+    color: var(--cork-muted);
+    cursor: pointer;
+    background: rgb(15 23 42 / 0.78);
+    border: 1px solid var(--border-40);
+    border-radius: 12px;
+    backdrop-filter: blur(6px);
+    pointer-events: auto;
+    animation: slide-in 0.25s ease-out;
+  }
+  .band-session { font-size: 11px; white-space: nowrap; opacity: 0.8; }
+  .band-summary { flex: 1; min-width: 0; overflow: hidden; font-size: 13px; color: var(--faint-text); text-overflow: ellipsis; white-space: nowrap; }
+  .band-progress {
+    position: absolute;
+    bottom: 0;
+    left: 0;
+    width: 100%;
+    height: 2px;
+    background: var(--accent-40);
+    transform-origin: left;
+    animation-name: shrink;
+    animation-timing-function: linear;
+    animation-fill-mode: forwards;
+  }
+  @keyframes shrink { from { transform: scaleX(1); } to { transform: scaleX(0); } }
+  @keyframes slide-in { from { transform: translateY(-8px); opacity: 0; } to { transform: none; opacity: 1; } }
+
+  .kind { display: inline-flex; padding: 0 8px; font-size: 11px; line-height: 18px; white-space: nowrap; border: 1px solid var(--border-40); border-radius: 9999px; }
+  .kind.ask { color: var(--cork-warning); background: var(--warning-15); border-color: var(--warning-40); }
+  .kind.approve { color: var(--cork-accent-hover); background: var(--accent-20); border-color: var(--accent-40); }
+
+  /* 一覧（「通知」ボタンの下に開く。帯より手前に出す） */
+  .panel {
+    position: absolute;
+    top: 8px;
+    right: 16px;
+    z-index: 2;
+    width: min(380px, calc(100% - 32px));
+    max-height: 70%;
+    padding: 12px;
+    overflow-y: auto;
+    background: var(--cork-surface);
+    border: 1px solid var(--border-40);
+    border-radius: 12px;
+    box-shadow: 0 16px 40px rgb(0 0 0 / 0.5);
+    pointer-events: auto;
+  }
+  .panel[hidden] { display: none; }
+  .panel-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
+  .panel-title { font-size: 14px; font-weight: 600; }
+  .close-button { width: 28px; height: 28px; color: var(--cork-muted); background: transparent; border: 0; border-radius: 8px; cursor: pointer; }
+  .close-button:hover { color: var(--cork-text); background: var(--cork-elevated); }
+  .item { padding: 10px 8px; border-bottom: 1px solid var(--border-40); }
+  .item-head { display: flex; align-items: center; gap: 8px; }
+  .item-session { font-size: 12px; color: var(--cork-muted); }
+  .item-time { margin-left: auto; font-size: 11px; color: var(--cork-muted); }
+  .item-summary { margin-top: 4px; font-size: 13px; line-height: 1.6; }
+  .empty { padding: 16px 8px; font-size: 13px; color: var(--cork-muted); }
+
+  /* デモ用の帯（デザインの一部ではない） */
+  .demo {
+    position: fixed;
+    bottom: 12px;
+    left: 50%;
+    z-index: 1000;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding: 4px;
+    font: 600 12px/1 ui-sans-serif, system-ui, -apple-system, "Hiragino Sans", sans-serif;
+    color: #0f172a;
+    white-space: nowrap;
+    background: #fde047;
+    border-radius: 9999px;
+    box-shadow: 0 6px 20px rgb(0 0 0 / 0.5);
+    transform: translateX(-50%);
+  }
+  .demo span { padding: 0 8px; }
+  .demo button { height: 28px; padding: 0 10px; font-size: 12px; font-weight: 600; color: inherit; background: transparent; border: 0; border-radius: 9999px; cursor: pointer; }
+  .demo button:hover { background: rgb(15 23 42 / 0.12); }
+</style>
+</head>
+<body>
+  <header class="app-bar">
+    <div class="brand">
+      <span class="brand-name">binone</span>
+      <span class="mono">ダミーデータ</span>
+    </div>
+    <button id="bell" class="bell" type="button">
+      <span>通知</span>
+      <span id="count" class="count" hidden></span>
+    </button>
+  </header>
+
+  <div class="host" aria-hidden="true">
+    <div class="bd-header"><span class="bd-title">スイムレーン</span><span class="mono">後ろの画面の見本（静的）</span></div>
+    <div class="bd-board">
+      <div class="bd-col">
+        <div class="bd-col-head">draft <span>2</span></div>
+        <div class="bd-card">検索APIの調査<small>プロジェクトA ・ 調査</small></div>
+        <div class="bd-card">ログイン画面の改修<small>プロジェクトB ・ 実装</small></div>
+      </div>
+      <div class="bd-col">
+        <div class="bd-col-head">todo <span>3</span></div>
+        <div class="bd-card">DB設計の見直し<small>プロジェクトC ・ レビュー</small></div>
+        <div class="bd-card">一覧画面のページング<small>プロジェクトA ・ 実装</small></div>
+        <div class="bd-card">通知機能の要件整理<small>プロジェクトB ・ 調査</small></div>
+      </div>
+      <div class="bd-col">
+        <div class="bd-col-head">prepare <span>2</span></div>
+        <div class="bd-card">認証フローの提案<small>プロジェクトA ・ 調査</small></div>
+        <div class="bd-card">ダッシュボードの配置案<small>プロジェクトC ・ 実装</small></div>
+      </div>
+      <div class="bd-col">
+        <div class="bd-col-head">doing <span>3</span></div>
+        <div class="bd-card">バッチ処理の実装<small>プロジェクトB ・ 実装</small></div>
+        <div class="bd-card">API仕様書の更新<small>プロジェクトA ・ レビュー</small></div>
+        <div class="bd-card">検索UIの調整<small>プロジェクトC ・ 実装</small></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="overlay">
+    <div id="stack" class="stack"></div>
+    <aside id="panel" class="panel" hidden></aside>
+  </div>
+
+  <div class="demo" role="toolbar" aria-label="デモ">
+    <span>デモ</span>
+    <button id="fire-one" type="button">通知を送る</button>
+    <button id="fire-three" type="button">3件まとめて</button>
+  </div>
+
+<script>
+  const DURATION = 6000; // 帯が消えるまでの時間（ミリ秒）。仕様には時間の決めが無いので仮の値
+  const MAX_BANDS = 4; // 同時に出す帯の数。超えたら古い物（一番上）から消す
+
+  // bantou セッションからの通知（ダミー）。セッション名はプロジェクト名と同じ
+  const SAMPLES = [
+    { session: "プロジェクトA", kind: "承認待ち", summary: "認証フローの提案: proposal（修正版）の承認を待っています" },
+    { session: "プロジェクトB", kind: "質問", summary: "バッチ処理の実装: 集計の実行時刻はどうしますか？" },
+    { session: "プロジェクトC", kind: "質問", summary: "検索UIの調整: 強調表示の色は今のアクセント色でよいですか？" },
+    { session: "採用", kind: "知らせ", summary: "面接（11/26 14:00）: 持ち物のうち、ポートフォリオの印刷がまだです" },
+  ];
+
+  const ui = { log: [], unread: 0, listOpen: false };
+  let seq = 0;
+
+  const $ = (id) => document.getElementById(id);
+
+  function el(tag, className, text) {
+    const node = document.createElement(tag);
+    if (className) node.className = className;
+    if (text != null) node.textContent = text;
+    return node;
+  }
+
+  function hhmm() {
+    const d = new Date();
+    return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+  }
+
+  function kindPill(kind) {
+    const extra = kind === "質問" ? " ask" : kind === "承認待ち" ? " approve" : "";
+    return el("span", `kind${extra}`, kind);
+  }
+
+  // 一覧（新しい順）と、未読の数
+  function refresh() {
+    $("count").hidden = ui.unread === 0;
+    $("count").textContent = String(ui.unread);
+
+    const panel = $("panel");
+    panel.hidden = !ui.listOpen;
+    panel.textContent = "";
+    const head = el("div", "panel-head");
+    const close = el("button", "close-button", "×");
+    close.type = "button";
+    close.setAttribute("aria-label", "閉じる");
+    close.addEventListener("click", () => setList(false));
+    head.append(el("h2", "panel-title", "通知の一覧"), close);
+    panel.append(head);
+    if (ui.log.length === 0) panel.append(el("div", "empty", "通知はまだありません"));
+    for (const n of ui.log) {
+      const item = el("div", "item");
+      const itemHead = el("div", "item-head");
+      itemHead.append(kindPill(n.kind), el("span", "item-session", n.session), el("span", "item-time", n.at));
+      item.append(itemHead, el("div", "item-summary", n.summary));
+      panel.append(item);
+    }
+  }
+
+  function setList(open) {
+    ui.listOpen = open;
+    if (open) ui.unread = 0;
+    refresh();
+  }
+
+  // 帯（時限モーダル）: 発信元のセッション名と概要の一部を薄く出し、時間切れで消える。右上から下へ積む
+  function showBand(n) {
+    const band = el("div", "band");
+    const progress = el("span", "band-progress");
+    progress.style.animationDuration = `${DURATION}ms`;
+    band.append(el("span", "band-session", n.session), kindPill(n.kind), el("span", "band-summary", n.summary), progress);
+    band.addEventListener("click", () => setList(true));
+    const stack = $("stack");
+    stack.append(band);
+    while (stack.children.length > MAX_BANDS) stack.firstElementChild.remove();
+    setTimeout(() => band.remove(), DURATION);
+  }
+
+  // 通知を受けた時の処理（デモでは下の帯のボタンから呼ぶ）
+  function receive() {
+    const sample = SAMPLES[seq % SAMPLES.length];
+    seq += 1;
+    const n = { ...sample, id: seq, at: hhmm() };
+    ui.log.unshift(n);
+    if (!ui.listOpen) ui.unread += 1;
+    showBand(n);
+    refresh();
+  }
+
+  $("bell").addEventListener("click", () => setList(!ui.listOpen));
+  $("fire-one").addEventListener("click", receive);
+  $("fire-three").addEventListener("click", () => {
+    receive();
+    setTimeout(receive, 400);
+    setTimeout(receive, 800);
+  });
+
+  refresh();
+  setTimeout(receive, 800); // 開いた時に1件出す
+</script>
+</body>
+</html>

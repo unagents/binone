@@ -1,0 +1,676 @@
+<!DOCTYPE html>
+<!--
+  依頼の一覧（prototype 3案から採用した案A「テーブル」）と、行を押すと開く依頼状況（prototype 3案から採用した案A「タイムライン」）。
+  prototype のファイルは削除済み（git の履歴に残る）。
+  承認待ちの proposal は、タイムラインの行の「承認」でも承認できる。?open=<change 名かタイトル> を付けると、その依頼の状況を直接開く。
+  1つのファイルにまとめているのは、Obsidian の中では埋め込んだ画面から別のファイルへ移ると中身が空になるため。
+  右のチャットは binoneエージェントで、一覧と依頼状況で共通。データはダミー。保存しない。配色は Cork（https://github.com/koki-develop/Cork）に合わせる。
+-->
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>依頼の一覧</title>
+<style>
+  :root {
+    color-scheme: dark;
+    --cork-bg: #020617;
+    --cork-surface: #0f172a;
+    --cork-elevated: #1e293b;
+    --cork-border: #334155;
+    --cork-muted: #94a3b8;
+    --cork-text: #f1f5f9;
+    --cork-accent: #6366f1;
+    --cork-accent-hover: #818cf8;
+    --cork-warning: #fbbf24;
+    --cork-success: #4ade80;
+
+    --border-30: color-mix(in oklab, var(--cork-border) 30%, transparent);
+    --border-40: color-mix(in oklab, var(--cork-border) 40%, transparent);
+    --border-50: color-mix(in oklab, var(--cork-border) 50%, transparent);
+    --surface-60: color-mix(in oklab, var(--cork-surface) 60%, transparent);
+    --elevated-60: color-mix(in oklab, var(--cork-elevated) 60%, transparent);
+    --elevated-80: color-mix(in oklab, var(--cork-elevated) 80%, transparent);
+    --accent-10: color-mix(in oklab, var(--cork-accent) 10%, transparent);
+    --accent-20: color-mix(in oklab, var(--cork-accent) 20%, transparent);
+    --accent-25: color-mix(in oklab, var(--cork-accent) 25%, transparent);
+    --accent-40: color-mix(in oklab, var(--cork-accent) 40%, transparent);
+    --accent-50: color-mix(in oklab, var(--cork-accent) 50%, transparent);
+    --warning-15: color-mix(in oklab, var(--cork-warning) 15%, transparent);
+    --warning-40: color-mix(in oklab, var(--cork-warning) 40%, transparent);
+    --muted-50: color-mix(in oklab, var(--cork-muted) 50%, transparent);
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    font-family: "Inter Variable", "Inter", ui-sans-serif, system-ui, -apple-system, "Hiragino Sans", "Noto Sans JP", sans-serif;
+    color: var(--cork-text);
+    background: var(--cork-bg);
+    -webkit-font-smoothing: antialiased;
+  }
+  h1, h2, h3, p, ol { margin: 0; }
+  button { font: inherit; }
+  ::placeholder { color: var(--muted-50); }
+
+  /* ヘッダー（Cork の AppHeader） */
+  .app-header {
+    display: flex;
+    flex-shrink: 0;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    padding: 12px 24px;
+    border-bottom: 1px solid var(--border-50);
+  }
+  .header-left { display: flex; align-items: center; gap: 16px; min-width: 0; }
+  .app-title { font-size: 14px; line-height: 20px; font-weight: 600; white-space: nowrap; }
+  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; color: var(--cork-muted); white-space: nowrap; }
+  .muted-xs { font-size: 12px; color: var(--cork-muted); white-space: nowrap; }
+  .back-button {
+    padding: 4px 10px;
+    font-size: 12px;
+    color: var(--cork-muted);
+    white-space: nowrap;
+    background: transparent;
+    border: 1px solid var(--border-40);
+    border-radius: 8px;
+    cursor: pointer;
+  }
+  .back-button:hover { color: var(--cork-text); background: var(--cork-elevated); }
+
+  .main { display: flex; flex: 1; min-height: 0; }
+  .content { position: relative; display: flex; flex: 1; flex-direction: column; min-width: 0; min-height: 0; }
+  .variant-body { position: relative; display: flex; flex: 1; flex-direction: column; min-height: 0; }
+
+  /* 状態（レーン） */
+  .state-text { font-size: 12px; color: var(--cork-muted); white-space: nowrap; }
+
+  /* 依頼の一覧（テーブル） */
+  .lt { flex: 1; min-height: 0; padding: 8px 24px 24px; overflow: auto; }
+  .lt-table { width: 100%; border-collapse: separate; border-spacing: 0; font-size: 13px; }
+  .lt-table th {
+    position: sticky;
+    top: 0;
+    z-index: 1;
+    padding: 10px 8px;
+    font-size: 12px;
+    font-weight: 500;
+    letter-spacing: 0.05em;
+    text-align: left;
+    color: var(--cork-muted);
+    white-space: nowrap;
+    background: var(--cork-bg);
+    border-bottom: 1px solid var(--border-40);
+  }
+  .lt-table td { padding: 10px 8px; vertical-align: middle; border-bottom: 1px solid var(--border-30); }
+  .lt-row { cursor: pointer; }
+  .lt-row:hover td { background: var(--elevated-60); }
+  .lt-title { min-width: 160px; font-size: 14px; font-weight: 500; }
+  .lt-muted { color: var(--cork-muted); white-space: nowrap; }
+  .lt-state { display: flex; flex-direction: column; gap: 4px; }
+
+  /* 依頼状況: 共通 */
+  .summary { display: flex; flex-shrink: 0; flex-wrap: wrap; align-items: center; gap: 8px 16px; padding: 14px 24px; border-bottom: 1px solid var(--border-40); }
+  .summary-title { font-size: 16px; font-weight: 600; }
+  .summary-meta { font-size: 12px; color: var(--cork-muted); }
+  .summary-steps { display: flex; flex-wrap: wrap; gap: 4px; margin-left: auto; }
+  .step-pill { padding: 1px 8px; font-size: 11px; color: var(--cork-muted); border: 1px solid var(--border-40); border-radius: 9999px; }
+  .step-pill.done { color: var(--cork-accent-hover); background: var(--accent-10); border-color: var(--accent-25); }
+  .step-pill.current { color: #ffffff; background: var(--accent-50); border-color: var(--cork-accent); }
+  .actor { display: inline-flex; align-items: center; height: 20px; padding: 0 8px; font-size: 11px; font-weight: 500; color: var(--cork-muted); white-space: nowrap; background: var(--cork-elevated); border-radius: 9999px; }
+  .actor.user { color: var(--cork-accent-hover); background: var(--accent-20); }
+  .time { font-size: 12px; color: var(--cork-muted); white-space: nowrap; }
+  .sub { margin-top: 4px; font-size: 12px; line-height: 1.6; color: var(--cork-muted); }
+  .open-hint { font-size: 12px; color: var(--cork-accent-hover); white-space: nowrap; }
+  .question { margin-top: 8px; padding: 10px 12px; background: var(--warning-15); border: 1px solid var(--warning-40); border-radius: 10px; }
+  .question-text { font-size: 13px; font-weight: 500; }
+  .options { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+  .option { padding: 4px 12px; font-size: 12px; color: var(--cork-text); background: var(--elevated-80); border: 1px solid var(--border-40); border-radius: 9999px; cursor: pointer; }
+  .option:hover { border-color: var(--cork-accent); }
+  .answered { margin-top: 6px; font-size: 12px; color: var(--cork-success); }
+  .status-pill { display: inline-flex; padding: 0 8px; font-size: 11px; line-height: 18px; color: var(--cork-muted); white-space: nowrap; border: 1px solid var(--border-40); border-radius: 9999px; }
+  .status-pill.waiting { color: var(--cork-warning); border-color: var(--warning-40); }
+  .status-pill.ok { color: var(--cork-success); border-color: color-mix(in oklab, var(--cork-success) 40%, transparent); }
+  .output-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+  .output-type { font-size: 11px; font-weight: 500; letter-spacing: 0.05em; text-transform: uppercase; color: var(--cork-muted); }
+  .output-title { margin-top: 2px; font-size: 18px; font-weight: 700; }
+  .output-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 8px; font-size: 12px; color: var(--cork-muted); }
+  .output-body { margin-top: 16px; padding: 12px 14px; font-size: 14px; line-height: 1.75; white-space: pre-wrap; background: var(--elevated-60); border: 1px solid var(--border-30); border-radius: 10px; }
+  .actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 16px; }
+  .modify { display: flex; flex-direction: column; gap: 8px; margin-top: 12px; }
+  .close-button { display: inline-flex; align-items: center; justify-content: center; width: 28px; height: 28px; color: var(--cork-muted); background: transparent; border: 0; border-radius: 8px; cursor: pointer; }
+  .close-button:hover { color: var(--cork-text); background: var(--cork-elevated); }
+  .empty { font-size: 13px; color: var(--cork-muted); }
+  .cards { display: flex; flex-shrink: 0; gap: 10px; min-height: 64px; padding: 12px 24px; overflow-x: auto; border-top: 1px solid var(--border-40); }
+  .card { flex-shrink: 0; width: 180px; padding: 10px 12px; text-align: left; color: var(--cork-text); background: var(--elevated-80); border: 1px solid var(--border-30); border-radius: 12px; cursor: pointer; }
+  .card:hover { border-color: var(--cork-border); }
+  .card.selected { border-color: var(--cork-accent); background: var(--accent-10); }
+  .card-title { margin-top: 2px; font-size: 14px; font-weight: 500; }
+  .card-foot { display: flex; align-items: center; justify-content: space-between; gap: 6px; margin-top: 8px; }
+  .btn { padding: 8px 16px; font-size: 12px; white-space: nowrap; border: 1px solid transparent; border-radius: 8px; cursor: pointer; }
+  .btn-primary { font-weight: 600; color: #ffffff; background: var(--cork-accent); }
+  .btn-primary:hover { background: var(--cork-accent-hover); }
+  .btn-secondary { font-weight: 500; color: var(--cork-muted); background: transparent; border-color: var(--border-40); }
+  .btn-secondary:hover { color: var(--cork-text); background: var(--cork-elevated); }
+  .control { padding: 6px 12px; font: inherit; font-size: 14px; line-height: 20px; color: var(--cork-text); resize: none; background: var(--elevated-60); border: 1px solid var(--border-40); border-radius: 8px; outline: none; }
+  .control:focus { border-color: var(--accent-50); }
+
+  /* 依頼状況 案A: タイムライン */
+  .sa { flex: 1; min-height: 0; padding: 16px 24px; overflow-y: auto; }
+  .sa-list { position: relative; padding: 0; list-style: none; }
+  .sa-item { position: relative; padding: 0 0 16px 24px; }
+  .sa-item::before { content: ""; position: absolute; top: 6px; bottom: -6px; left: 5px; width: 1px; background: var(--border-50); }
+  .sa-item:last-child::before { display: none; }
+  .sa-dot { position: absolute; top: 4px; left: 0; width: 11px; height: 11px; background: var(--cork-bg); border: 2px solid var(--cork-border); border-radius: 9999px; }
+  .sa-item.output .sa-dot { border-color: var(--cork-accent); }
+  .sa-item.ask .sa-dot { border-color: var(--cork-warning); }
+  .sa-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; }
+  .sa-text { font-size: 14px; }
+  .sa-item.output .sa-box { padding: 6px 8px; margin: -6px -8px 0; border-radius: 8px; cursor: pointer; }
+  .sa-approve { padding: 3px 12px; }
+  .sa-item.output .sa-box:hover { background: var(--elevated-60); }
+  .sa-backdrop { position: absolute; inset: 0; z-index: 5; display: flex; align-items: center; justify-content: center; background: rgb(2 6 23 / 0.65); }
+  .sa-modal { width: min(620px, 92%); max-height: 88%; padding: 24px; overflow-y: auto; background: var(--cork-surface); border: 1px solid var(--border-40); border-radius: 12px; box-shadow: 0 24px 48px rgb(0 0 0 / 0.5); }
+
+  /* 右側: binoneエージェントのチャット（一覧と依頼状況で共通） */
+  .chat { display: flex; flex-direction: column; flex-shrink: 0; width: 300px; min-height: 0; background: var(--surface-60); border-left: 1px solid var(--border-40); }
+  .chat-head { padding: 12px 16px; border-bottom: 1px solid var(--border-40); }
+  .chat-title { font-size: 14px; line-height: 20px; font-weight: 600; }
+  .messages { display: flex; flex: 1; flex-direction: column; gap: 12px; min-height: 0; padding: 16px; overflow-y: auto; }
+  .msg { max-width: 90%; padding: 10px 12px; font-size: 14px; line-height: 1.6; white-space: pre-wrap; overflow-wrap: anywhere; border-radius: 12px; }
+  .msg-agent { align-self: flex-start; background: var(--elevated-80); border: 1px solid var(--border-30); }
+  .msg-user { align-self: flex-end; background: var(--accent-20); border: 1px solid var(--accent-40); }
+  .composer { display: flex; align-items: flex-end; gap: 8px; padding: 12px; border-top: 1px solid var(--border-40); }
+  .composer .control { flex: 1; }
+</style>
+</head>
+<body>
+  <header class="app-header">
+    <div class="header-left">
+      <button id="back-button" class="back-button" type="button" hidden>← 依頼の一覧</button>
+      <h1 id="screen-title" class="app-title">依頼の一覧</h1>
+      <span id="screen-note" class="mono"></span>
+    </div>
+    <span id="header-right" class="muted-xs"></span>
+  </header>
+
+  <div class="main">
+    <div id="content" class="content"></div>
+
+    <aside class="chat" aria-label="binoneエージェントとのチャット">
+      <div class="chat-head"><h2 class="chat-title">binoneエージェント</h2></div>
+      <div id="messages" class="messages"></div>
+      <div class="composer">
+        <textarea id="chat-input" class="control" rows="2" placeholder="質問や指示" aria-label="メッセージ"></textarea>
+        <button id="send-button" class="btn btn-primary" type="button">送信</button>
+      </div>
+    </aside>
+  </div>
+
+<script>
+  // ---- データ（ダミー） ----
+  // protocol ごとの手順。spec-driven は仕様の例どおり。もう1つは独自 schema の例（名前も手順もダミー）
+  const PROTOCOLS = {
+    "spec-driven": ["proposal", "specs", "design", "tasks", "apply"],
+    "予定補助（ダミー）": ["予定の確認", "持ち物の確認", "直前の知らせ"],
+  };
+
+  // step: 今いる手順の番号（0 始まり）。null は未開始、手順の数以上は全手順済み
+  const REQUESTS = [
+    { title: "検索APIの調査", project: "プロジェクトA", kind: "調査", protocol: "spec-driven", change: "",
+      lane: "draft", step: null, updatedAt: "2026-11-22T18:05" },
+    { title: "ログイン画面の改修", project: "プロジェクトB", kind: "実装", protocol: "spec-driven", change: "",
+      lane: "draft", step: null, updatedAt: "2026-11-21T09:40" },
+    { title: "DB設計の見直し", project: "プロジェクトC", kind: "レビュー", protocol: "spec-driven", change: "review-db-schema",
+      lane: "todo", step: null, updatedAt: "2026-11-20T15:12" },
+    { title: "一覧画面のページング", project: "プロジェクトA", kind: "実装", protocol: "spec-driven", change: "add-list-paging",
+      lane: "todo", step: null, updatedAt: "2026-11-22T10:30" },
+    { title: "認証フローの提案", project: "プロジェクトA", kind: "調査", protocol: "spec-driven", change: "propose-auth-flow",
+      lane: "prepare", step: 0, updatedAt: "2026-11-21T16:45" },
+    { title: "ダッシュボードの配置案", project: "プロジェクトC", kind: "実装", protocol: "spec-driven", change: "dashboard-layout",
+      lane: "prepare", step: 0, updatedAt: "2026-11-18T13:20" },
+    { title: "API仕様書の更新", project: "プロジェクトA", kind: "レビュー", protocol: "spec-driven", change: "update-api-spec",
+      lane: "prepare", step: 2, updatedAt: "2026-11-20T09:05" },
+    { title: "バッチ処理の実装", project: "プロジェクトB", kind: "実装", protocol: "spec-driven", change: "add-batch-aggregation",
+      lane: "doing", step: 4, updatedAt: "2026-11-22T21:10" },
+    { title: "検索UIの調整", project: "プロジェクトC", kind: "実装", protocol: "spec-driven", change: "tune-search-ui",
+      lane: "doing", step: 4, updatedAt: "2026-11-23T08:50" },
+    { title: "面接（11/26 14:00）", project: "採用", kind: "予定", protocol: "予定補助（ダミー）", change: "",
+      lane: "doing", step: 1, updatedAt: "2026-11-23T07:30" },
+    { title: "ログ出力の整理", project: "プロジェクトB", kind: "レビュー", protocol: "spec-driven", change: "tidy-logging",
+      lane: "done", step: 5, updatedAt: "2026-11-17T17:30" },
+    { title: "旧画面の削除", project: "プロジェクトC", kind: "実装", protocol: "spec-driven", change: "remove-old-settings",
+      lane: "archive", step: 5, updatedAt: "2026-11-10T10:00" },
+  ].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)); // 更新の新しい順
+
+  // 履歴を作り込んだ依頼。ほかの依頼は手順から履歴を組み立てる
+  const DETAILED = {
+    "バッチ処理の実装": {
+      outputs: [
+        { id: "proposal", type: "proposal", title: "proposal", by: "担当エージェント", at: "2026-11-21T18:30", status: "承認済み",
+          body: "## なぜ\n夜間の集計を手作業で回しており、抜けが出ている。\n\n## 何を変えるか\n- 集計をバッチにする\n- 結果を集計表へ書き込む" },
+        { id: "specs", type: "specs", title: "specs", by: "担当エージェント", at: "2026-11-22T11:30", status: "提出済み",
+          body: "## 要件: 夜間集計\n毎日決まった時刻に、前日分を集計して集計表へ書き込む。" },
+        { id: "design", type: "design", title: "design", by: "担当エージェント", at: "2026-11-22T13:00", status: "提出済み",
+          body: "## 構成\n- 集計クエリ\n- バッチの起動（定期実行）\n- 失敗時の再実行" },
+        { id: "tasks", type: "tasks", title: "tasks", by: "担当エージェント", at: "2026-11-22T16:20", status: "提出済み",
+          body: "- [x] task-1 バッチの雛形作成\n- [x] task-2 集計クエリの作成\n- [ ] task-3 定期実行の設定" },
+      ],
+      history: [
+        { at: "2026-11-22T21:20", actor: "担当エージェント", text: "質問しています", step: "apply",
+          question: { text: "集計の実行時刻はどうしますか？", options: ["毎日 2:00", "毎日 4:00", "手動で実行"], answer: null } },
+        { at: "2026-11-22T21:10", actor: "担当エージェント", text: "task-2（集計クエリの作成）を終了", step: "apply", report: "集計クエリを追加し、テストを通しました。" },
+        { at: "2026-11-22T19:30", actor: "担当エージェント", text: "task-2（集計クエリの作成）を開始", step: "apply" },
+        { at: "2026-11-22T18:40", actor: "担当エージェント", text: "task-1（バッチの雛形作成）を終了", step: "apply", report: "雛形と設定ファイルを作りました。" },
+        { at: "2026-11-22T17:05", actor: "担当エージェント", text: "task-1（バッチの雛形作成）を開始", step: "apply" },
+        { at: "2026-11-22T16:20", actor: "担当エージェント", text: "tasks を提出", step: "tasks", output: "tasks" },
+        { at: "2026-11-22T13:00", actor: "担当エージェント", text: "design を提出", step: "design", output: "design" },
+        { at: "2026-11-22T11:30", actor: "担当エージェント", text: "specs を提出", step: "specs", output: "specs" },
+        { at: "2026-11-22T10:15", actor: "ユーザー", text: "proposal を承認", step: "proposal" },
+        { at: "2026-11-21T18:30", actor: "担当エージェント", text: "proposal を提出", step: "proposal", output: "proposal" },
+        { at: "2026-11-21T09:40", actor: "ユーザー", text: "新規に依頼を登録", step: "登録" },
+      ],
+    },
+    "認証フローの提案": {
+      outputs: [
+        { id: "proposal-1", type: "proposal", title: "proposal（初版）", by: "担当エージェント", at: "2026-11-21T11:00", status: "修正を指示",
+          body: "## なぜ\nトークンの期限切れで操作が途中で止まる。\n\n## 何を変えるか\n- 有効期限を延ばす\n- 再発行の流れを決める" },
+        { id: "proposal-2", type: "proposal", title: "proposal（修正版）", by: "担当エージェント", at: "2026-11-21T16:45", status: "承認待ち",
+          body: "## なぜ\nトークンの期限切れで操作が途中で止まる。\n\n## 何を変えるか\n- 有効期限を延ばす\n- 再発行の流れを決める\n- 失効した時は、ログイン画面へ戻して理由を出す（修正の指示を反映）" },
+      ],
+      history: [
+        { at: "2026-11-21T16:45", actor: "担当エージェント", text: "proposal（修正版）を提出", step: "proposal", output: "proposal-2" },
+        { at: "2026-11-21T14:10", actor: "ユーザー", text: "proposal の修正を指示", step: "proposal", report: "失効した時の扱いを加えてください。" },
+        { at: "2026-11-21T11:00", actor: "担当エージェント", text: "proposal（初版）を提出", step: "proposal", output: "proposal-1" },
+        { at: "2026-11-21T09:05", actor: "ユーザー", text: "新規に依頼を登録", step: "登録" },
+      ],
+    },
+  };
+
+  // 画面の状態。依頼状況のデータは開いた時に作り、承認などの変更を覚えておく（保存はしない）
+  const view = { screen: "list", index: null, open: null, modifying: false };
+  const statusCache = new Map();
+
+  // ---- 共通の部品 ----
+  const $ = (id) => document.getElementById(id);
+
+  function el(tag, className, text) {
+    const node = document.createElement(tag);
+    if (className) node.className = className;
+    if (text != null) node.textContent = text;
+    return node;
+  }
+
+  const pad = (n) => String(n).padStart(2, "0");
+  const toIso = (d) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  const nowIso = () => toIso(new Date());
+
+  function minusMinutes(iso, minutes) {
+    const d = new Date(iso);
+    d.setMinutes(d.getMinutes() - minutes);
+    return toIso(d);
+  }
+
+  function formatDate(iso) {
+    const [date, time] = iso.split("T");
+    const [, month, day] = date.split("-");
+    return `${Number(month)}/${Number(day)} ${time}`;
+  }
+
+  function stepState(req, i) {
+    if (req.step === null) return "todo";
+    if (i < req.step) return "done";
+    if (i === req.step) return "current";
+    return "todo";
+  }
+
+  function closeButton(onClick) {
+    const button = el("button", "close-button", "×");
+    button.type = "button";
+    button.setAttribute("aria-label", "閉じる");
+    button.addEventListener("click", onClick);
+    return button;
+  }
+
+  // ---- 依頼の一覧（採用した案A: テーブル。行を押すと依頼状況が開く） ----
+  function renderList(root) {
+    const scroll = el("div", "lt");
+    const table = el("table", "lt-table");
+    table.append(el("thead"), el("tbody"));
+    const head = el("tr");
+    for (const name of ["タイトル", "プロジェクト", "種別", "protocol", "状態", "更新"]) head.append(el("th", "", name));
+    table.tHead.append(head);
+
+    REQUESTS.forEach((req, index) => {
+      const row = el("tr", "lt-row");
+      const state = el("div", "lt-state");
+      state.append(el("span", "state-text", req.lane));
+      const stateCell = el("td");
+      stateCell.append(state);
+      row.append(
+        el("td", "lt-title", req.title),
+        el("td", "lt-muted", req.project),
+        el("td", "lt-muted", req.kind),
+        el("td", "lt-muted", req.protocol),
+        stateCell,
+        el("td", "lt-muted", formatDate(req.updatedAt)),
+      );
+      row.addEventListener("click", () => openStatus(index));
+      table.tBodies[0].append(row);
+    });
+    scroll.append(table);
+    root.append(scroll);
+  }
+
+  // ---- 依頼状況のデータ ----
+  // 作り込んだ依頼はそのまま使う。ほかは手順の進み具合から履歴と出力を組み立てる（中身はダミー）
+  function buildStatus(req) {
+    const detailed = DETAILED[req.title];
+    if (detailed) return { request: req, outputs: detailed.outputs, history: detailed.history };
+
+    const steps = PROTOCOLS[req.protocol];
+    const events = []; // 古い順に積む
+    const outputs = [];
+    events.push({ actor: "ユーザー", text: req.lane === "draft" ? "依頼の下書きを保存" : "新規に依頼を登録", step: "登録" });
+
+    if (req.step !== null) {
+      const last = Math.min(req.step, steps.length - 1);
+      for (let i = 0; i <= last; i++) {
+        const step = steps[i];
+        const finished = i < req.step;
+        if (req.protocol !== "spec-driven") {
+          events.push({ actor: "担当エージェント", text: `${step}を${finished ? "終了" : "開始"}`, step });
+          continue;
+        }
+        if (step === "apply") {
+          events.push({ actor: "担当エージェント", text: "task-1 を開始", step });
+          events.push({ actor: "担当エージェント", text: "task-1 を終了", step, report: "（ダミー）task-1 の完了報告" });
+          events.push({ actor: "担当エージェント", text: "task-2 を開始", step });
+          if (finished) events.push({ actor: "担当エージェント", text: "task-2 を終了", step, report: "（ダミー）task-2 の完了報告" });
+          continue;
+        }
+        if (!finished && step !== "proposal") continue; // 進行中の手順には、まだ終わったプロセスが無い
+        events.push({ actor: "担当エージェント", text: `${step} を提出`, step, output: step });
+        outputs.push({
+          id: step, type: step, title: step, by: "担当エージェント",
+          status: step === "proposal" ? (finished ? "承認済み" : "承認待ち") : "提出済み",
+          body: `## ${step}\n（ダミー）「${req.title}」の ${step}。`,
+        });
+        if (step === "proposal" && finished) events.push({ actor: "ユーザー", text: "proposal を承認", step });
+      }
+      if (req.lane === "archive") events.push({ actor: "担当エージェント", text: "後始末（archive）を終了", step: "archive" });
+    }
+
+    // 時刻は更新日時から 90 分ずつさかのぼって振る
+    events.forEach((event, i) => {
+      event.at = minusMinutes(req.updatedAt, (events.length - 1 - i) * 90);
+    });
+    for (const out of outputs) out.at = events.find((e) => e.output === out.id).at;
+    return { request: req, outputs, history: events.reverse() };
+  }
+
+  const status = () => statusCache.get(view.index);
+  const findOutput = (id) => status().outputs.find((o) => o.id === id);
+
+  function openStatus(index) {
+    if (!statusCache.has(index)) statusCache.set(index, buildStatus(REQUESTS[index]));
+    view.screen = "status";
+    view.index = index;
+    view.open = null;
+    view.modifying = false;
+    renderAll();
+  }
+
+  function backToList() {
+    view.screen = "list";
+    view.open = null;
+    view.modifying = false;
+    renderAll();
+  }
+
+  function open(id) {
+    view.open = id;
+    view.modifying = false;
+    renderAll();
+  }
+
+  // ---- 依頼状況の部品 ----
+  function actorChip(actor) {
+    return el("span", actor === "ユーザー" ? "actor user" : "actor", actor);
+  }
+
+  function statusPill(value) {
+    const kind = value === "承認待ち" ? "status-pill waiting" : value === "承認済み" ? "status-pill ok" : "status-pill";
+    return el("span", kind, value);
+  }
+
+  // 質問（AskUserQuestion の形式: 選択肢から選んで答える）
+  function questionBlock(item) {
+    const box = el("div", "question");
+    box.append(el("div", "question-text", item.question.text));
+    if (item.question.answer) {
+      box.append(el("div", "answered", `回答済み: ${item.question.answer}`));
+      return box;
+    }
+    const options = el("div", "options");
+    for (const option of item.question.options) {
+      const button = el("button", "option", option);
+      button.type = "button";
+      button.addEventListener("click", (event) => {
+        event.stopPropagation();
+        item.question.answer = option;
+        say("agent", `「${option}」で ${item.actor} に返しました。`);
+        renderAll();
+      });
+      options.append(button);
+    }
+    box.append(options);
+    return box;
+  }
+
+  function approve(id) {
+    const out = findOutput(id);
+    const s = status();
+    out.status = "承認済み";
+    s.history.unshift({ at: nowIso(), actor: "ユーザー", text: `${out.title} を承認`, step: "proposal" });
+    s.request.step = PROTOCOLS[s.request.protocol].indexOf("proposal") + 1;
+    renderAll();
+  }
+
+  function requestChanges(id, note) {
+    const out = findOutput(id);
+    out.status = "修正を指示";
+    status().history.unshift({ at: nowIso(), actor: "ユーザー", text: `${out.title} の修正を指示`, step: "proposal", report: note });
+    view.modifying = false;
+    renderAll();
+  }
+
+  // 出力の中身。承認待ちの proposal には「承認」「修正を指示」を出す
+  function outputView(out, onClose) {
+    const wrap = el("div", "output");
+    const head = el("div", "output-head");
+    const titles = el("div");
+    titles.append(el("div", "output-type", out.type), el("h2", "output-title", out.title));
+    head.append(titles);
+    if (onClose) head.append(closeButton(onClose));
+    const meta = el("div", "output-meta");
+    meta.append(el("span", "", `提出: ${out.by} ・ ${formatDate(out.at)}`), statusPill(out.status));
+    wrap.append(head, meta, el("div", "output-body", out.body));
+
+    if (out.status === "承認待ち") {
+      const actions = el("div", "actions");
+      const ok = el("button", "btn btn-primary", "承認");
+      ok.type = "button";
+      ok.addEventListener("click", () => approve(out.id));
+      const fix = el("button", "btn btn-secondary", "修正を指示");
+      fix.type = "button";
+      fix.addEventListener("click", () => {
+        view.modifying = true;
+        renderAll();
+      });
+      actions.append(ok, fix);
+      wrap.append(actions);
+
+      if (view.modifying) {
+        const form = el("div", "modify");
+        const note = el("textarea", "control");
+        note.rows = 3;
+        note.placeholder = "どう直してほしいかを書く";
+        const sendNote = el("button", "btn btn-primary", "修正の指示を送る");
+        sendNote.type = "button";
+        sendNote.addEventListener("click", () => {
+          if (note.value.trim()) requestChanges(out.id, note.value.trim());
+        });
+        form.append(note, sendNote);
+        wrap.append(form);
+      }
+    }
+    return wrap;
+  }
+
+  function summary() {
+    const req = status().request;
+    const box = el("div", "summary");
+    const titles = el("div");
+    titles.append(
+      el("div", "summary-title", req.title),
+      el("div", "summary-meta", `${req.project} ・ ${req.kind} ・ ${req.protocol} ・ change: ${req.change || "—"}`),
+    );
+    const steps = el("div", "summary-steps");
+    PROTOCOLS[req.protocol].forEach((name, i) => steps.append(el("span", `step-pill ${stepState(req, i)}`, name)));
+    box.append(titles, steps);
+    return box;
+  }
+
+  // 一番下の出力カード（左から右へ提出順。多いと横にスクロール）
+  function cardStrip() {
+    const strip = el("div", "cards");
+    const outputs = status().outputs;
+    if (outputs.length === 0) strip.append(el("span", "empty", "出力はまだありません"));
+    for (const out of outputs) {
+      const card = el("button", out.id === view.open ? "card selected" : "card");
+      card.type = "button";
+      const foot = el("div", "card-foot");
+      foot.append(el("span", "time", formatDate(out.at)), statusPill(out.status));
+      card.append(el("div", "output-type", out.type), el("div", "card-title", out.title), foot);
+      card.addEventListener("click", () => open(out.id));
+      strip.append(card);
+    }
+    return strip;
+  }
+
+  // ---- 依頼状況 案A: タイムライン（出力はモーダル） ----
+  function renderStatusA(body) {
+    const scroll = el("div", "sa");
+    const list = el("ol", "sa-list");
+    for (const item of status().history) {
+      const li = el("li", item.output ? "sa-item output" : item.question ? "sa-item ask" : "sa-item");
+      li.append(el("span", "sa-dot"));
+      const box = el("div", "sa-box");
+      const row = el("div", "sa-row");
+      row.append(actorChip(item.actor), el("span", "sa-text", item.text), el("span", "time", formatDate(item.at)));
+      if (item.output) {
+        row.append(el("span", "open-hint", "開く ›"));
+        // 承認待ちの proposal は、タイムラインの行からも承認できる
+        if (findOutput(item.output).status === "承認待ち") {
+          const approveButton = el("button", "btn btn-primary sa-approve", "承認");
+          approveButton.type = "button";
+          approveButton.addEventListener("click", (event) => {
+            event.stopPropagation();
+            approve(item.output);
+          });
+          row.append(approveButton);
+        }
+      }
+      box.append(row);
+      if (item.report) box.append(el("div", "sub", item.report));
+      if (item.question) box.append(questionBlock(item));
+      if (item.output) box.addEventListener("click", () => open(item.output));
+      li.append(box);
+      list.append(li);
+    }
+    scroll.append(list);
+    body.append(scroll);
+
+    if (view.open) {
+      const backdrop = el("div", "sa-backdrop");
+      const modal = el("div", "sa-modal");
+      modal.append(outputView(findOutput(view.open), () => open(null)));
+      backdrop.append(modal);
+      backdrop.addEventListener("click", (event) => {
+        if (event.target === backdrop) open(null);
+      });
+      body.append(backdrop);
+    }
+  }
+
+  // ---- 描画 ----
+  function renderAll() {
+    const root = $("content");
+    root.textContent = "";
+    const onStatus = view.screen === "status";
+    $("back-button").hidden = !onStatus;
+    $("screen-title").textContent = onStatus ? "依頼状況" : "依頼の一覧";
+    $("screen-note").textContent = "ダミーデータ";
+
+    if (!onStatus) {
+      $("header-right").textContent = `${REQUESTS.length} 件`;
+      renderList(root);
+      return;
+    }
+    $("header-right").textContent = `レーン: ${status().request.lane}`;
+    const body = el("div", "variant-body");
+    renderStatusA(body);
+    root.append(summary(), body, cardStrip());
+  }
+
+  $("back-button").addEventListener("click", backToList);
+
+  // ---- binoneエージェントのチャット（応答はダミー。承認待ちの依頼では「承認」で承認できる） ----
+  const isImeEnter = (event) => event.isComposing || event.keyCode === 229;
+
+  function say(role, text) {
+    const list = $("messages");
+    list.append(el("div", `msg msg-${role}`, text));
+    list.scrollTop = list.scrollHeight;
+  }
+
+  function send() {
+    const input = $("chat-input");
+    const text = input.value.trim();
+    if (!text) return;
+    input.value = "";
+    say("user", text);
+    if (view.screen === "status") {
+      const waiting = status().outputs.find((o) => o.status === "承認待ち");
+      if (waiting && text.includes("承認")) {
+        approve(waiting.id);
+        say("agent", `${waiting.title} を承認しました。`);
+        return;
+      }
+      const req = status().request;
+      say("agent", `（ダミー応答）「${req.title}」は今「${req.lane}」です。`);
+      return;
+    }
+    say("agent", "（ダミー応答）プロトタイプのため、ここでは定型文を返します。");
+  }
+  $("send-button").addEventListener("click", send);
+  $("chat-input").addEventListener("keydown", (event) => {
+    if (event.key !== "Enter" || event.shiftKey || isImeEnter(event)) return;
+    event.preventDefault();
+    send();
+  });
+
+  say("agent", "依頼の一覧です。行を押すと、その依頼の状況が開きます。");
+
+  // ?open=<change 名かタイトル> の時は、その依頼の状況を直接開く
+  const openKey = new URLSearchParams(location.search).get("open");
+  const openIndex = REQUESTS.findIndex((req) => openKey && (req.change === openKey || req.title === openKey));
+  if (openIndex >= 0) openStatus(openIndex);
+  else renderAll();
+</script>
+</body>
+</html>
