@@ -5,6 +5,7 @@ import {
   DEFAULT_VIEW,
   EMPTY_FILTER,
   buildBoard,
+  cardRoute,
   filterChoices,
   isFiltering,
   normalizeHidden,
@@ -91,8 +92,7 @@ function press(item: RequestSummary, event: MouseEvent) {
     selected.value = toggleSelected(selected.value, item.id);
     return;
   }
-  // A draft opens its registration screen; the others open the request's status.
-  void router.push(`/requests/${item.id}`);
+  void router.push(cardRoute(item));
 }
 
 function dragStart(item: RequestSummary, event: DragEvent) {
@@ -188,7 +188,7 @@ async function batchClosed(changed: boolean) {
       <UButton size="xs" data-testid="selection-submit" @click="startBatch(selectedDrafts)">todo にする</UButton>
       <UButton size="xs" color="neutral" variant="ghost" @click="selected = []">選択を解除</UButton>
     </div>
-    <p v-else class="text-xs text-muted">draft のカードは Shift を押しながら押すと複数選べます。カードを todo のレーンへドラッグして todo にします。</p>
+    <p v-else class="text-xs text-muted">draft のカードは Shift を押しながら押すと複数選べます。カードを todo のレーンへドラッグして todo にします。todo を隠している時は、選んだ draft の「todo にする」ボタンで todo 化します。</p>
 
     <p v-if="loading && !data" class="text-sm text-muted" data-testid="loading">読み込んでいます…</p>
     <ApiErrorAlert v-if="error" :error="error" />
@@ -225,7 +225,7 @@ async function batchClosed(changed: boolean) {
               :data-card="item.id"
               tabindex="0"
               @click="press(item, $event)"
-              @keydown.enter="router.push(`/requests/${item.id}`)"
+              @keydown.enter="router.push(cardRoute(item))"
               @dragstart="dragStart(item, $event)"
               @dragend="dragEnd"
             >

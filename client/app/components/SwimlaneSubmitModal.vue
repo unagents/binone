@@ -25,10 +25,20 @@ function choose(choice: StopChoice) {
   resolve?.(choice);
 }
 
+// The board is read again only when no call is in flight: a call sent before the modal was
+// closed may still turn a draft into a todo, so `close` waits for the batch to end.
+let finished = false;
+let emitted = false;
+function emitClose() {
+  if (emitted) return;
+  emitted = true;
+  emit("close", changed.value);
+}
+
 function close() {
   closed = true;
   choose("abort");
-  emit("close", changed.value);
+  if (finished) emitClose();
 }
 
 watch(open, (value) => {
@@ -57,6 +67,8 @@ onMounted(async () => {
     isClosed: () => closed,
   });
   current.value = null;
+  finished = true;
+  if (closed) emitClose();
 });
 
 const summary = computed(() => (result.value ? summarizeBatch(result.value.entries) : null));

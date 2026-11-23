@@ -3,6 +3,7 @@ import type { LaneDef, RequestSummary } from "../app/types/binone";
 import {
   EMPTY_FILTER,
   applyFilter,
+  cardRoute,
   buildBoard,
   filterChoices,
   foldedLane,
@@ -126,5 +127,25 @@ describe("filterChoices and parseView", () => {
     expect(parseView(null).order).toBe("UPDATED_DESC");
     expect(parseView("{oops").groupBy).toBe("none");
     expect(parseView(JSON.stringify({ hidden: ["doing", 3], groupBy: "x", order: "PROJECT_ASC" }))).toEqual({ hidden: ["doing"], groupBy: "none", order: "PROJECT_ASC" });
+  });
+});
+
+describe("the draft lane is pinned by name too", () => {
+  const shifted: LaneDef[] = ["todo", "draft", "doing"].map((name) => ({ name, label: null }));
+  it("keeps a lane named draft even when it is not first", () => {
+    expect(visibleLanes(shifted, ["draft", "doing"]).map((l) => l.name)).toEqual(["todo", "draft"]);
+    expect(normalizeHidden(shifted, ["todo", "draft", "doing"])).toEqual(["doing"]);
+    expect(foldedLane(shifted, ["draft"], "draft")).toBe("draft");
+  });
+});
+
+describe("cardRoute", () => {
+  it("sends a draft to the registration screen with its id", () => {
+    expect(cardRoute({ id: "req_1", lane: "draft" })).toBe("/requests/new?id=req_1");
+    expect(cardRoute({ id: "a b/c", lane: "draft" })).toBe("/requests/new?id=a%20b%2Fc");
+  });
+  it("sends the others to the request status", () => {
+    expect(cardRoute({ id: "req_2", lane: "todo" })).toBe("/requests/req_2");
+    expect(cardRoute({ id: "req_3", lane: "doing" })).toBe("/requests/req_3");
   });
 });

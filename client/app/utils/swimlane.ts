@@ -49,15 +49,26 @@ export function sortItems(items: readonly RequestSummary[], order: SwimlaneOrder
   });
 }
 
+const PINNED_LANE = "draft";
+
+/** The first lane and the lane named `draft` are always shown. */
+function isPinned(lanes: readonly LaneDef[], index: number): boolean {
+  return index === 0 || lanes[index]?.name === PINNED_LANE;
+}
+
+/** Where a press on a card goes: a draft to the registration screen (edit), the rest to the status. */
+export function cardRoute(item: Pick<RequestSummary, "id" | "lane">): string {
+  return item.lane === PINNED_LANE ? `/requests/new?id=${encodeURIComponent(item.id)}` : `/requests/${encodeURIComponent(item.id)}`;
+}
+
 /** The lanes to draw: the configured ones minus the hidden ones. The first lane is always kept. */
 export function visibleLanes(lanes: readonly LaneDef[], hidden: readonly LaneName[]): LaneDef[] {
-  return lanes.filter((lane, index) => index === 0 || !hidden.includes(lane.name));
+  return lanes.filter((lane, index) => isPinned(lanes, index) || !hidden.includes(lane.name));
 }
 
 /** A hidden set that cannot hide the first lane, nor a lane that does not exist. */
 export function normalizeHidden(lanes: readonly LaneDef[], hidden: readonly LaneName[]): LaneName[] {
-  const first = lanes[0]?.name;
-  return lanes.map((lane) => lane.name).filter((name) => name !== first && hidden.includes(name));
+  return lanes.filter((lane, index) => !isPinned(lanes, index) && hidden.includes(lane.name)).map((lane) => lane.name);
 }
 
 /**
@@ -69,7 +80,7 @@ export function foldedLane(lanes: readonly LaneDef[], hidden: readonly LaneName[
   if (index < 0) return null;
   for (let i = index; i >= 0; i--) {
     const candidate = lanes[i];
-    if (candidate && (i === 0 || !hidden.includes(candidate.name))) return candidate.name;
+    if (candidate && (isPinned(lanes, i) || !hidden.includes(candidate.name))) return candidate.name;
   }
   return null;
 }
