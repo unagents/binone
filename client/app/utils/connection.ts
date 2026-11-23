@@ -73,13 +73,13 @@ export function describeConnectError(
       };
     case "forbidden":
       return {
-        title: "サーバーが鍵の発行を断りました",
-        description: "この Mac の IP が、サーバーの設定で鍵を渡してよい IP 範囲に入っているかを確かめてください。",
+        title: "この network からは鍵を取れません。server と同じ network から初回の接続をしてください",
+        description: "鍵は、server が決めた network からだけ受け取れます。鍵を持った後は、外の network からでも使えます。",
       };
     case "unauthorized":
       return {
-        title: "サーバーが鍵を受け付けませんでした",
-        description: "鍵を取り直しても通りませんでした。少し置いてからもう一度接続し、続く時はサーバーの状態を確かめてください。",
+        title: "この server では鍵が無効です",
+        description: "この server は、持っている鍵を受け付けませんでした。「鍵を取り直す」で、server と同じ network から鍵を取り直してください。",
       };
     case "bad_response":
       return {
@@ -102,4 +102,35 @@ export function describeConnectError(
         description: "サーバーには何も送っていません。アプリを開き直しても続く時は、下の詳細を添えて知らせてください。",
       };
   }
+}
+
+/** What the connection screen shows. */
+export type ConnectionView =
+  /** The saved connection is being tried. */
+  | "restoring"
+  /** A working connection. */
+  | "connected"
+  /** No key is held: the address form that fetches one (first start, after "接続をやり直す", or "鍵を取り直す"). */
+  | "acquire"
+  /** A key is held but the server at the saved address does not accept it. */
+  | "key_invalid"
+  /** A key is held and the connection failed for another reason: change the address or try again. */
+  | "failed";
+
+/**
+ * Which screen the state calls for. The key-fetching form is shown only when no key is held
+ * (`hasKey` false) or the user asked to fetch the key again (`reacquiring`); otherwise the usual
+ * connection is the one that is shown, with the address and nothing about how a key is fetched.
+ */
+export function connectionView(state: {
+  restoring: boolean;
+  connected: boolean;
+  hasKey: boolean;
+  reacquiring: boolean;
+  failureKind: ConnectErrorKind | null;
+}): ConnectionView {
+  if (state.restoring) return "restoring";
+  if (state.connected) return "connected";
+  if (!state.hasKey || state.reacquiring) return "acquire";
+  return state.failureKind === "unauthorized" ? "key_invalid" : "failed";
 }

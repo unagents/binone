@@ -7,6 +7,10 @@
 //! - key acquisition: `POST /key` (no body) -> 200 `{"key":"<string>"}`; 403 when the client's
 //!   address is outside the range the server allows.
 //! - everything else carries `Authorization: Bearer <key>`; 401 when it is missing or invalid.
+//!
+//! The two connections are kept apart: `acquire_key` (the key's own address, used only by the
+//! first-connection / re-acquire flow) and `server_version` (GraphQL, used every other time). A
+//! 401 on GraphQL never triggers `acquire_key`; the screen asks the user.
 //! - GraphQL: `POST /graphql`. The connection check is `query { serverInfo { version } }`.
 //!
 //! Redirects are not followed: the key is only ever sent to the address the user entered, and a
@@ -77,20 +81,10 @@ impl ConnectError {
     }
 }
 
-/// The time a request may take: `REQUEST_TIMEOUT`, or (under test, on this thread only) what
-/// `testing::allow_slow_requests` set.
-fn request_timeout() -> Duration {
-    #[cfg(test)]
-    if let Some(limit) = testing::REQUEST_TIMEOUT_OVERRIDE.with(std::cell::Cell::get) {
-        return limit;
-    }
-    REQUEST_TIMEOUT
-}
-
 pub(crate) fn client() -> Result<reqwest::Client, ConnectError> {
     reqwest::Client::builder()
         .connect_timeout(CONNECT_TIMEOUT)
-        .timeout(request_timeout())
+        .timeout(REQUEST_TIMEOUT)
         // The server is addressed by IP on the user's network; a system proxy must not sit between.
         .no_proxy()
         // Never follow a redirect: the key must not travel to an address the user did not enter.
@@ -189,7 +183,7 @@ struct ServerInfo {
 
 /// The connection check: asks the server for its version with the key.
 pub async fn server_version(endpoint: &Endpoint, key: &str) -> Result<String, ConnectError> {
-    // Checked before anything is sent; `resume` replaces a saved key that fails this.
+    // Checked before anything is sent: a key that cannot be sent is reported like a rejected one.
     let authorization = bearer(key).ok_or_else(|| {
         ConnectError::new(ErrorKind::Unauthorized, "POST /graphql: the key cannot be sent in a header")
     })?;
@@ -215,38 +209,9 @@ pub async fn server_version(endpoint: &Endpoint, key: &str) -> Result<String, Co
         .ok_or_else(|| ConnectError::new(ErrorKind::BadResponse, "POST /graphql: no data.serverInfo.version"))
 }
 
-/// First connection to an endpoint: get a key, then check it. Returns the key and the server's version.
-pub async fn connect(endpoint: &Endpoint) -> Result<(String, String), ConnectError> {
-    let key = acquire_key(endpoint).await?;
-    let version = server_version(endpoint, &key).await?;
-    Ok((key, version))
-}
-
-/// Connection with a saved key. When the server no longer accepts the key (401), or the saved
-/// key cannot be sent at all, a new key is acquired once. Returns the key now in use (new or unchanged) and the server's version.
-pub async fn resume(endpoint: &Endpoint, key: &str) -> Result<(String, String), ConnectError> {
-    match server_version(endpoint, key).await {
-        Ok(version) => Ok((key.to_owned(), version)),
-        Err(e) if e.kind == ErrorKind::Unauthorized => connect(endpoint).await,
-        Err(e) => Err(e),
-    }
-}
-
 /// Stand-ins for the server, shared by the tests of this crate.
 #[cfg(test)]
 pub(crate) mod testing {
-    use std::cell::Cell;
-    use std::time::Duration;
-
-    thread_local! {
-        pub(super) static REQUEST_TIMEOUT_OVERRIDE: Cell<Option<Duration>> = const { Cell::new(None) };
-    }
-
-    /// For a test whose result must not depend on how fast the machine is: requests made from this
-    /// thread get a long time-out instead of the short one used under test (other tests keep theirs).
-    pub fn allow_slow_requests() {
-        REQUEST_TIMEOUT_OVERRIDE.with(|limit| limit.set(Some(Duration::from_secs(120))));
-    }
     use super::*;
     use std::io::{Read, Write};
     use std::net::{TcpListener, TcpStream};
@@ -390,59 +355,39 @@ mod tests {
     use std::net::TcpListener;
 
     #[test]
-    fn connect_gets_a_key_and_the_version() {
+    fn a_key_is_acquired_and_then_accepted() {
         let (endpoint, seen) = stub(good_server("k1"));
-        assert_eq!(run(connect(&endpoint)), Ok(("k1".to_owned(), "9.9.9".to_owned())));
+        let key = run(acquire_key(&endpoint)).unwrap();
+        assert_eq!(key, "k1");
+        assert_eq!(run(server_version(&endpoint, &key)), Ok("9.9.9".to_owned()));
         assert_eq!(*seen.lock().unwrap(), ["POST /key -", "POST /graphql Bearer k1"]);
     }
 
     #[test]
-    fn resume_uses_the_saved_key() {
-        let (endpoint, seen) = stub(good_server("k1"));
-        assert_eq!(run(resume(&endpoint, "k1")), Ok(("k1".to_owned(), "9.9.9".to_owned())));
-        assert_eq!(*seen.lock().unwrap(), ["POST /graphql Bearer k1"]);
-    }
-
-    #[test]
-    fn resume_gets_a_new_key_after_401() {
+    fn a_rejected_key_is_unauthorized_and_no_key_is_asked_for() {
         let (endpoint, seen) = stub(good_server("k2"));
-        assert_eq!(run(resume(&endpoint, "old")), Ok(("k2".to_owned(), "9.9.9".to_owned())));
-        assert_eq!(
-            *seen.lock().unwrap(),
-            ["POST /graphql Bearer old", "POST /key -", "POST /graphql Bearer k2"]
-        );
+        assert_eq!(run(server_version(&endpoint, "old")).unwrap_err().kind, ErrorKind::Unauthorized);
+        assert_eq!(*seen.lock().unwrap(), ["POST /graphql Bearer old"]);
     }
 
     #[test]
     fn forbidden_when_outside_the_allowed_range() {
         let (endpoint, _) = stub(|_: &str, _: Option<&str>| (403, String::new()));
-        assert_eq!(run(connect(&endpoint)).unwrap_err().kind, ErrorKind::Forbidden);
-    }
-
-    #[test]
-    fn unauthorized_when_the_new_key_is_rejected_too() {
-        let (endpoint, _) = stub(|path: &str, _: Option<&str>| match path {
-            "/key" => (200, r#"{"key":"k"}"#.to_owned()),
-            _ => (401, String::new()),
-        });
-        assert_eq!(run(resume(&endpoint, "old")).unwrap_err().kind, ErrorKind::Unauthorized);
+        assert_eq!(run(acquire_key(&endpoint)).unwrap_err().kind, ErrorKind::Forbidden);
     }
 
     #[test]
     fn bad_response_when_the_shape_differs() {
         let (endpoint, _) = stub(|_: &str, _: Option<&str>| (200, r#"{"token":"secret-value"}"#.to_owned()));
-        let error = run(connect(&endpoint)).unwrap_err();
+        let error = run(acquire_key(&endpoint)).unwrap_err();
         assert_eq!(error.kind, ErrorKind::BadResponse);
         assert!(!error.detail.contains("secret-value"));
 
-        let (endpoint, _) = stub(|path: &str, _: Option<&str>| match path {
-            "/key" => (200, r#"{"key":"k"}"#.to_owned()),
-            _ => (200, r#"{"errors":[{"message":"unknown field"}]}"#.to_owned()),
-        });
-        assert_eq!(run(connect(&endpoint)).unwrap_err().kind, ErrorKind::BadResponse);
+        let (endpoint, _) = stub(|_: &str, _: Option<&str>| (200, r#"{"errors":[{"message":"unknown field"}]}"#.to_owned()));
+        assert_eq!(run(server_version(&endpoint, "k")).unwrap_err().kind, ErrorKind::BadResponse);
 
         let (endpoint, _) = stub(|_: &str, _: Option<&str>| (500, "oops".to_owned()));
-        assert_eq!(run(connect(&endpoint)).unwrap_err().kind, ErrorKind::BadResponse);
+        assert_eq!(run(acquire_key(&endpoint)).unwrap_err().kind, ErrorKind::BadResponse);
     }
 
     #[test]
@@ -451,7 +396,7 @@ mod tests {
         for status in [301, 302, 303, 307, 308] {
             // The key acquisition is redirected: no key comes out of it.
             let (endpoint, seen) = stub(redirect_to(status, &target));
-            let error = run(connect(&endpoint)).unwrap_err();
+            let error = run(acquire_key(&endpoint)).unwrap_err();
             assert_eq!(error.kind, ErrorKind::BadResponse, "{status}");
             assert_eq!(error.detail, format!("POST /key: HTTP {status} (a redirect; it is not followed)"));
             assert_eq!(*seen.lock().unwrap(), ["POST /key -"]);
@@ -459,7 +404,7 @@ mod tests {
             // A request with the key is redirected: the key does not go to the other address,
             // and the answer is not taken for a rejected key (no new key is asked for).
             let (endpoint, seen) = stub(redirect_to(status, &target));
-            let error = run(resume(&endpoint, "k1")).unwrap_err();
+            let error = run(server_version(&endpoint, "k1")).unwrap_err();
             assert_eq!(error.kind, ErrorKind::BadResponse, "{status}");
             assert_eq!(*seen.lock().unwrap(), ["POST /graphql Bearer k1"]);
         }
@@ -471,22 +416,22 @@ mod tests {
         // Bind and drop to get a port that is closed.
         let port = TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
         let endpoint = Endpoint { host: Ipv4Addr::LOCALHOST, port: Some(port) };
-        let error = run(connect(&endpoint)).unwrap_err();
+        let error = run(acquire_key(&endpoint)).unwrap_err();
         assert_eq!(error, ConnectError::new(ErrorKind::Unreachable, "POST /key: could not connect"));
-        assert_eq!(run(resume(&endpoint, "k")).unwrap_err().kind, ErrorKind::Unreachable);
+        assert_eq!(run(server_version(&endpoint, "k")).unwrap_err().kind, ErrorKind::Unreachable);
     }
 
     #[test]
     fn unreachable_when_the_server_does_not_answer() {
         let (endpoint, connections) = silent();
         let started = std::time::Instant::now();
-        let error = run(connect(&endpoint)).unwrap_err();
+        let error = run(acquire_key(&endpoint)).unwrap_err();
         assert_eq!(error, ConnectError::new(ErrorKind::Unreachable, "POST /key: timed out"));
         assert!(started.elapsed() >= REQUEST_TIMEOUT);
         assert!(started.elapsed() < REQUEST_TIMEOUT * 5);
         assert_eq!(*connections.lock().unwrap(), 1);
 
-        let error = run(resume(&endpoint, "k")).unwrap_err();
+        let error = run(server_version(&endpoint, "k")).unwrap_err();
         assert_eq!(error, ConnectError::new(ErrorKind::Unreachable, "POST /graphql: timed out"));
     }
 
@@ -494,7 +439,7 @@ mod tests {
     fn a_key_that_cannot_be_sent_is_not_reported_as_unreachable() {
         // From the server: refused as an answer of the wrong shape, before it is used or saved.
         let (endpoint, seen) = stub(|_: &str, _: Option<&str>| (200, r#"{"key":"line1\nline2"}"#.to_owned()));
-        let error = run(connect(&endpoint)).unwrap_err();
+        let error = run(acquire_key(&endpoint)).unwrap_err();
         assert_eq!(error.kind, ErrorKind::BadResponse);
         assert!(!error.detail.contains("line1"));
         assert_eq!(*seen.lock().unwrap(), ["POST /key -"]);
@@ -508,10 +453,10 @@ mod tests {
             assert!(!error.detail.contains(key));
         }
 
-        // Saved: replaced by a new key, like a key the server no longer accepts.
+        // Saved: reported as a key the server does not accept, without sending it or asking for another.
         let (endpoint, seen) = stub(good_server("k2"));
-        assert_eq!(run(resume(&endpoint, "line1\nline2")), Ok(("k2".to_owned(), "9.9.9".to_owned())));
-        assert_eq!(*seen.lock().unwrap(), ["POST /key -", "POST /graphql Bearer k2"]);
+        assert_eq!(run(server_version(&endpoint, "line1\nline2")).unwrap_err().kind, ErrorKind::Unauthorized);
+        assert!(seen.lock().unwrap().is_empty());
     }
 
     #[test]

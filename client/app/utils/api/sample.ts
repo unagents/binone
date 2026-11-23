@@ -54,6 +54,11 @@ function sampleCheck(kind: SampleUpdate): UpdateCheck {
   return { state: "up_to_date", current, latest: current };
 }
 
+/** The sample server refuses a key at this address (as outside the range the server allows). */
+export const SAMPLE_OUTSIDE_RANGE_HOST = "192.0.2.4";
+/** The sample server does not accept the key held when it is asked to connect to this address. */
+export const SAMPLE_KEY_REJECTED_HOST = "192.0.2.1";
+
 export function createSampleServer(options: SampleOptions = {}): NativeCall {
   const now = options.now ?? Date.now();
   let nextId = 100;
@@ -190,14 +195,35 @@ export function createSampleServer(options: SampleOptions = {}): NativeCall {
     registerConversation: () => true,
   };
 
+  // What the native side saves: the address, and whether a key is held with it.
+  const saved = { host: "127.0.0.1", port: null as number | null, key: true };
+  const connectedAt = (host: string, port: number | null) => ({ host, port, version: "sample" });
+  const addressOf = (a?: Record<string, unknown>) => ({ host: String(a?.host ?? "127.0.0.1"), port: (a?.port as number | null | undefined) ?? null });
+
   return async (command, args) => {
     switch (command) {
       case "default_port":
         return 47610;
       case "restore":
-        return { state: "connected", host: "127.0.0.1", port: null, version: "sample" };
-      case "connect":
-        return { host: String(args?.host ?? "127.0.0.1"), port: (args?.port as number | null) ?? null, version: "sample" };
+        if (!saved.key) return { state: "none" };
+        return { state: "connected", ...connectedAt(saved.host, saved.port) };
+      case "connect": {
+        // The key's connection: fetches a key and replaces the one held.
+        const { host, port } = addressOf(args);
+        if (host === SAMPLE_OUTSIDE_RANGE_HOST) fail("forbidden", "POST /key: 403");
+        Object.assign(saved, { host, port, key: true });
+        return connectedAt(host, port);
+      }
+      case "change_address": {
+        // The usual connection: the key that is held goes to the new address; no key is fetched.
+        const { host, port } = addressOf(args);
+        if (!saved.key || host === SAMPLE_KEY_REJECTED_HOST) fail("unauthorized", "POST /graphql: 401");
+        Object.assign(saved, { host, port });
+        return connectedAt(host, port);
+      }
+      case "forget_connection":
+        saved.key = false;
+        return null;
       case "check_update":
         return sampleCheck(options.update ?? "latest");
       case "run_update":

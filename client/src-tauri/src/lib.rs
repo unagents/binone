@@ -47,9 +47,8 @@ fn connected(endpoint: &Endpoint, version: String) -> Connected {
     Connected { host: endpoint.host.to_string(), port: endpoint.port, version }
 }
 
-/// The user confirmed an address: get a key, save the address and the key, check the connection.
-/// The address and the key are saved as soon as the key is acquired, before the check.
-async fn connect_and_save(settings: &Path, host: &str, port: Option<u16>) -> Result<Connected, ConnectError> {
+/// The address as typed on the screen.
+fn parse_endpoint(host: &str, port: Option<u16>) -> Result<Endpoint, ConnectError> {
     let host: Ipv4Addr = host
         .trim()
         .parse()
@@ -57,32 +56,43 @@ async fn connect_and_save(settings: &Path, host: &str, port: Option<u16>) -> Res
     if port == Some(0) {
         return Err(ConnectError::new(ErrorKind::InvalidInput, "the port must be 1 to 65535"));
     }
-    let endpoint = Endpoint { host, port };
+    Ok(Endpoint { host, port })
+}
+
+/// The key-acquisition connection: the first connection, or "get the key again". Gets a key from
+/// the address, saves the address and the key (replacing any key held), then checks the connection.
+/// The address and the key are saved as soon as the key is acquired, before the check.
+async fn connect_and_save(settings: &Path, host: &str, port: Option<u16>) -> Result<Connected, ConnectError> {
+    let endpoint = parse_endpoint(host, port)?;
     let key = server::acquire_key(&endpoint).await?;
     storage::save(settings, &endpoint, &key)?;
     let version = server::server_version(&endpoint, &key).await?;
     Ok(connected(&endpoint, version))
 }
 
-/// Startup: try the saved address and key.
+/// The usual connection: another address, the same key. Nothing is saved unless the server there
+/// accepts the key, so a failed change leaves the saved connection as it was. A 401 is reported
+/// as it is; no key is acquired here.
+async fn change_address_and_save(settings: &Path, host: &str, port: Option<u16>) -> Result<Connected, ConnectError> {
+    let endpoint = parse_endpoint(host, port)?;
+    let Some((_, Some(key))) = storage::load(settings)? else {
+        return Err(ConnectError::new(ErrorKind::Unauthorized, "no key is saved"));
+    };
+    let version = server::server_version(&endpoint, &key).await?;
+    storage::save(settings, &endpoint, &key)?;
+    Ok(connected(&endpoint, version))
+}
+
+/// Startup: try the saved address with the saved key. A key is never acquired here: without one
+/// the screen asks for the first connection, and a rejected key is shown as such.
 async fn restore_saved(settings: &Path) -> Restored {
     let (endpoint, key) = match storage::load(settings) {
-        Ok(Some(saved)) => saved,
-        Ok(None) => return Restored::None,
+        // An address without a key counts as nothing saved.
+        Ok(Some((endpoint, Some(key)))) => (endpoint, key),
+        Ok(_) => return Restored::None,
         Err(error) => return Restored::Failed { host: String::new(), port: None, error },
     };
-    let result = match &key {
-        Some(key) => server::resume(&endpoint, key).await,
-        // An address without a key (should not happen): acquire one as on the first connection.
-        None => server::connect(&endpoint).await,
-    };
-    let result = result.and_then(|(new_key, version)| {
-        if key.as_deref() != Some(new_key.as_str()) {
-            storage::save(settings, &endpoint, &new_key)?;
-        }
-        Ok(version)
-    });
-    match result {
+    match server::server_version(&endpoint, &key).await {
         Ok(version) => Restored::Connected(connected(&endpoint, version)),
         Err(error) => Restored::Failed { host: endpoint.host.to_string(), port: endpoint.port, error },
     }
@@ -96,6 +106,17 @@ fn default_port() -> u16 {
 #[tauri::command]
 async fn connect(app: AppHandle, host: String, port: Option<u16>) -> Result<Connected, ConnectError> {
     connect_and_save(&settings_path(&app)?, &host, port).await
+}
+
+#[tauri::command]
+async fn change_address(app: AppHandle, host: String, port: Option<u16>) -> Result<Connected, ConnectError> {
+    change_address_and_save(&settings_path(&app)?, &host, port).await
+}
+
+/// Drops the saved address and key: the next start (and this one, once the screen is told) is a first connection.
+#[tauri::command]
+fn forget_connection(app: AppHandle) -> Result<(), ConnectError> {
+    storage::forget(&settings_path(&app)?)
 }
 
 #[tauri::command]
@@ -174,11 +195,13 @@ fn open_release_page() -> Result<(), String> {
 
 pub fn run() {
     tauri::Builder::default()
-        .manage(api::Gateway::default())
+        .manage(api::Gateway)
         .manage(update::UpdateGate::default())
         .invoke_handler(tauri::generate_handler![
             default_port,
             connect,
+            change_address,
+            forget_connection,
             restore,
             api_call,
             check_update,
@@ -244,44 +267,94 @@ mod tests {
     }
 
     #[test]
-    fn restore_saves_the_key_that_replaced_a_rejected_one() {
+    fn a_rejected_saved_key_is_reported_and_no_key_is_asked_for() {
         let dir = TestDir::new();
-        let (endpoint, _) = stub(good_server(KEY));
+        let (endpoint, seen) = stub(good_server(KEY));
         storage::save(&settings(&dir), &endpoint, "old-key").unwrap();
         let restored = run(restore_saved(&settings(&dir)));
-        assert_eq!(restored, Restored::Connected(connected(&endpoint, "9.9.9".to_owned())));
-        assert_eq!(storage::load(&settings(&dir)), Ok(Some((endpoint, Some(KEY.to_owned())))));
+        let Restored::Failed { error, .. } = &restored else { panic!("{restored:?}") };
+        assert_eq!(error.kind, ErrorKind::Unauthorized);
+        assert_eq!(*seen.lock().unwrap(), ["POST /graphql Bearer old-key"]);
+        // The key is still the one the user holds.
+        assert_eq!(storage::load(&settings(&dir)), Ok(Some((endpoint, Some("old-key".to_owned())))));
     }
 
     #[test]
-    fn restore_replaces_a_saved_key_that_cannot_be_sent() {
+    fn a_saved_key_that_cannot_be_sent_is_reported_and_nothing_is_sent() {
         let dir = TestDir::new();
         let (endpoint, seen) = stub(good_server(KEY));
         storage::save(&settings(&dir), &endpoint, "broken\nkey").unwrap();
         let restored = run(restore_saved(&settings(&dir)));
-        assert_eq!(restored, Restored::Connected(connected(&endpoint, "9.9.9".to_owned())));
-        // The unusable key never left this machine.
-        assert_eq!(*seen.lock().unwrap(), ["POST /key -".to_owned(), format!("POST /graphql Bearer {KEY}")]);
-        assert_eq!(storage::load(&settings(&dir)), Ok(Some((endpoint, Some(KEY.to_owned())))));
+        let Restored::Failed { error, .. } = &restored else { panic!("{restored:?}") };
+        assert_eq!(error.kind, ErrorKind::Unauthorized);
+        assert!(seen.lock().unwrap().is_empty());
     }
 
     #[test]
-    fn a_new_key_that_cannot_be_saved_leaves_the_saved_connection_as_it_was() {
+    fn an_address_without_a_key_is_the_first_connection() {
+        let dir = TestDir::new();
+        std::fs::write(settings(&dir), r#"{"endpoint":{"host":"127.0.0.1","port":1}}"#).unwrap();
+        assert_eq!(run(restore_saved(&settings(&dir))), Restored::None);
+    }
+
+    #[test]
+    fn changing_the_address_keeps_the_key() {
+        let dir = TestDir::new();
+        let (first, _) = stub(good_server(KEY));
+        run(connect_and_save(&settings(&dir), "127.0.0.1", port_of(&first))).unwrap();
+
+        let (second, seen) = stub(good_server(KEY));
+        let result = run(change_address_and_save(&settings(&dir), "127.0.0.1", port_of(&second))).unwrap();
+        assert_eq!(result, connected(&second, "9.9.9".to_owned()));
+        // The same key went to the new address; no key was asked for there.
+        assert_eq!(*seen.lock().unwrap(), [format!("POST /graphql Bearer {KEY}")]);
+        assert_eq!(storage::load(&settings(&dir)), Ok(Some((second, Some(KEY.to_owned())))));
+    }
+
+    #[test]
+    fn a_change_the_server_refuses_is_not_saved_and_asks_for_no_key() {
+        let dir = TestDir::new();
+        let (first, _) = stub(good_server(KEY));
+        run(connect_and_save(&settings(&dir), "127.0.0.1", port_of(&first))).unwrap();
+
+        // Another server that does not know this key (it would hand out a key at `/key`).
+        let (other, seen) = stub(good_server("another-key"));
+        let error = run(change_address_and_save(&settings(&dir), "127.0.0.1", port_of(&other))).unwrap_err();
+        assert_eq!(error.kind, ErrorKind::Unauthorized);
+        assert_eq!(*seen.lock().unwrap(), [format!("POST /graphql Bearer {KEY}")]);
+        assert_eq!(storage::load(&settings(&dir)), Ok(Some((first, Some(KEY.to_owned())))));
+    }
+
+    #[test]
+    fn getting_the_key_again_replaces_it() {
+        let dir = TestDir::new();
+        let (first, _) = stub(good_server("old-key"));
+        run(connect_and_save(&settings(&dir), "127.0.0.1", port_of(&first))).unwrap();
+        let (other, _) = stub(good_server(KEY));
+        run(connect_and_save(&settings(&dir), "127.0.0.1", port_of(&other))).unwrap();
+        assert_eq!(storage::load(&settings(&dir)), Ok(Some((other, Some(KEY.to_owned())))));
+    }
+
+    #[test]
+    fn a_key_refused_by_range_is_forbidden_and_the_held_key_stays() {
+        let dir = TestDir::new();
+        let (first, _) = stub(good_server(KEY));
+        run(connect_and_save(&settings(&dir), "127.0.0.1", port_of(&first))).unwrap();
+        let (outside, _) = stub(|_: &str, _: Option<&str>| (403, String::new()));
+        let error = run(connect_and_save(&settings(&dir), "127.0.0.1", port_of(&outside))).unwrap_err();
+        assert_eq!(error.kind, ErrorKind::Forbidden);
+        assert_eq!(storage::load(&settings(&dir)), Ok(Some((first, Some(KEY.to_owned())))));
+    }
+
+    #[test]
+    fn forgetting_the_connection_goes_back_to_the_first_connection() {
         let dir = TestDir::new();
         let (endpoint, _) = stub(good_server(KEY));
-        storage::save(&settings(&dir), &endpoint, "old-key").unwrap();
-        let before = std::fs::read(settings(&dir)).unwrap();
-
-        // The server replaces the rejected key, but the settings directory is read-only.
-        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o500)).unwrap();
-        let restored = run(restore_saved(&settings(&dir)));
-        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
-
-        let Restored::Failed { error, .. } = &restored else { panic!("{restored:?}") };
-        assert_eq!(error.kind, ErrorKind::Storage);
-        assert!(!json(&restored).contains(KEY));
-        assert_eq!(std::fs::read(settings(&dir)).unwrap(), before);
-        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+        run(connect_and_save(&settings(&dir), "127.0.0.1", port_of(&endpoint))).unwrap();
+        assert_eq!(storage::forget(&settings(&dir)), Ok(()));
+        assert_eq!(run(restore_saved(&settings(&dir))), Restored::None);
+        // Nothing saved is not an error either.
+        assert_eq!(storage::forget(&settings(&dir)), Ok(()));
     }
 
     #[test]

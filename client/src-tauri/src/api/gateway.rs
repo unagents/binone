@@ -1,16 +1,15 @@
 //! Sends a checked operation to the server with the saved address and key.
 //!
 //! The key is read from the settings file here and goes only into the `Authorization` header.
-//! When the server answers 401 (or the saved key cannot be sent at all) a new key is acquired
-//! once, saved, and the call is made again; this is the same replacement the connection screen
-//! does at startup. A change (mutation) is never sent a second time because of an unclear outcome:
-//! only a 401 repeats it, and a 401 means the server refused before doing anything.
+//! The two connections are separate: this one only ever talks GraphQL. When the server answers 401
+//! (or the saved key cannot be sent at all) the call fails as `unauthorized`; no key is acquired
+//! from here, so the key the user holds is never replaced behind their back and the screen can say
+//! the key is invalid for this server. A change (mutation) is never sent a second time.
 
 use std::path::Path;
 
 use reqwest::header::AUTHORIZATION;
 use serde_json::Value;
-use tauri::async_runtime::Mutex;
 
 use super::error::{redact_error, redact_value, ApiError, ApiErrorKind};
 use super::ops::{Operation, Prepared};
@@ -18,12 +17,9 @@ use super::response::interpret;
 use crate::server::{self, Endpoint};
 use crate::storage;
 
-/// State of the API calls: key replacements are taken one at a time, so calls that fail with 401
-/// together do not each acquire a key and write the settings file over one another.
+/// State of the API calls. There is none: the key is only read here, never replaced.
 #[derive(Default)]
-pub struct Gateway {
-    replacing_key: Mutex<()>,
-}
+pub struct Gateway;
 
 impl Gateway {
     /// Runs one operation. `name` and `args` come from the webview and are checked first; nothing is
@@ -33,53 +29,13 @@ impl Gateway {
         let (endpoint, saved_key) = storage::load(settings)?.ok_or_else(|| {
             ApiError::new(ApiErrorKind::NotConnected, "no server address is saved yet")
         })?;
-
-        let mut keys: Vec<String> = Vec::new();
-        let outcome = self.attempt(settings, endpoint, saved_key, &prepared, &mut keys).await;
-        // Whatever key was used or issued during the call, it is not in the result.
-        match outcome {
-            Ok(value) => Ok(keys.iter().fold(value, |value, key| redact_value(value, key))),
-            Err(error) => Err(keys.iter().fold(error, |error, key| redact_error(error, key))),
+        // An address without a key counts as not connected: the key is fetched on the first-connection screen.
+        let key = saved_key.ok_or_else(|| ApiError::new(ApiErrorKind::NotConnected, "no key is saved yet"))?;
+        // Whatever key was used, it is not in the result.
+        match send(&endpoint, &key, &prepared).await {
+            Ok(value) => Ok(redact_value(value, &key)),
+            Err(error) => Err(redact_error(error, &key)),
         }
-    }
-
-    async fn attempt(
-        &self,
-        settings: &Path,
-        endpoint: Endpoint,
-        saved_key: Option<String>,
-        prepared: &Prepared,
-        keys: &mut Vec<String>,
-    ) -> Result<Value, ApiError> {
-        let rejected = match &saved_key {
-            Some(key) => {
-                keys.push(key.clone());
-                match send(&endpoint, key, prepared).await {
-                    Err(e) if e.kind == ApiErrorKind::Unauthorized => Some(key.clone()),
-                    other => return other,
-                }
-            }
-            // An address without a key (should not happen): acquire one as on the first connection.
-            None => None,
-        };
-
-        let _replacing = self.replacing_key.lock().await;
-        // Another call may have replaced the key while this one waited for its turn.
-        let (endpoint, current) = match storage::load(settings)? {
-            Some(saved) => saved,
-            None => (endpoint, None),
-        };
-        let key = match current {
-            Some(current) if Some(&current) != rejected.as_ref() => current,
-            _ => {
-                let fresh = server::acquire_key(&endpoint).await?;
-                keys.push(fresh.clone());
-                storage::save(settings, &endpoint, &fresh)?;
-                fresh
-            }
-        };
-        keys.push(key.clone());
-        send(&endpoint, &key, prepared).await
     }
 }
 
@@ -139,7 +95,7 @@ fn read_failure(_: &reqwest::Error, mutation: bool) -> ApiError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::server::testing::{allow_slow_requests, redirect_to, run, silent, stub, stub_with_bodies};
+    use crate::server::testing::{redirect_to, run, silent, stub, stub_with_bodies};
     use crate::storage::testing::TestDir;
     use serde_json::json;
     use std::net::TcpListener;
@@ -153,7 +109,7 @@ mod tests {
     }
 
     fn call(settings: &Path, name: &str, args: Value) -> Result<Value, ApiError> {
-        run(Gateway::default().call(settings, name, Some(args)))
+        run(Gateway.call(settings, name, Some(args)))
     }
 
     fn data(field: &str, value: Value) -> (u16, String) {
@@ -207,65 +163,36 @@ mod tests {
     }
 
     #[test]
-    fn a_rejected_key_is_replaced_once_and_the_call_is_made_again() {
-        let dir = TestDir::new();
-        let (endpoint, seen, bodies) = stub_with_bodies(|path, authorization, _| match path {
-            "/key" => (200, format!(r#"{{"key":"{NEW_KEY}"}}"#)),
-            _ if authorization == Some(format!("Bearer {NEW_KEY}").as_str()) => data("createProject", json!("p1")),
-            _ => (401, String::new()),
-        });
-        storage::save(&settings(&dir), &endpoint, "old-key").unwrap();
-
-        let value = call(&settings(&dir), "createProject", json!({ "name": "p1" })).unwrap();
-        assert_eq!(value, json!("p1"));
-        assert_eq!(
-            *seen.lock().unwrap(),
-            ["POST /graphql Bearer old-key".to_owned(), "POST /key -".to_owned(), format!("POST /graphql Bearer {NEW_KEY}")]
-        );
-        // The same document and variables went out both times.
-        let bodies = bodies.lock().unwrap();
-        assert_eq!(bodies[0], bodies[2]);
-        // The new key was saved.
-        assert_eq!(storage::load(&settings(&dir)), Ok(Some((endpoint, Some(NEW_KEY.to_owned())))));
-    }
-
-    #[test]
-    fn a_saved_key_that_cannot_be_sent_is_replaced_too() {
+    fn a_rejected_key_is_unauthorized_and_no_key_is_asked_for() {
         let dir = TestDir::new();
         let (endpoint, seen) = stub(|path: &str, _: Option<&str>| match path {
             "/key" => (200, format!(r#"{{"key":"{NEW_KEY}"}}"#)),
-            _ => data("projects", json!([])),
+            _ => (401, String::new()),
         });
+        storage::save(&settings(&dir), &endpoint, "old-key").unwrap();
+        let error = call(&settings(&dir), "createProject", json!({ "name": "p1" })).unwrap_err();
+        assert_eq!(error.kind, ApiErrorKind::Unauthorized);
+        // One call, no `POST /key`; the saved key stays as it was.
+        assert_eq!(*seen.lock().unwrap(), ["POST /graphql Bearer old-key"]);
+        assert_eq!(storage::load(&settings(&dir)), Ok(Some((endpoint, Some("old-key".to_owned())))));
+    }
+
+    #[test]
+    fn a_saved_key_that_cannot_be_sent_is_unauthorized_and_nothing_is_sent() {
+        let dir = TestDir::new();
+        let (endpoint, seen) = stub(|_: &str, _: Option<&str>| data("projects", json!([])));
         storage::save(&settings(&dir), &endpoint, "broken\nkey").unwrap();
-        call(&settings(&dir), "projects", json!({})).unwrap();
-        assert_eq!(*seen.lock().unwrap(), ["POST /key -".to_owned(), format!("POST /graphql Bearer {NEW_KEY}")]);
-    }
-
-    #[test]
-    fn a_new_key_that_is_rejected_too_is_unauthorized_and_no_third_try_is_made() {
-        let dir = TestDir::new();
-        let (endpoint, seen) = stub(|path: &str, _: Option<&str>| match path {
-            "/key" => (200, format!(r#"{{"key":"{NEW_KEY}"}}"#)),
-            _ => (401, String::new()),
-        });
-        storage::save(&settings(&dir), &endpoint, "old-key").unwrap();
         let error = call(&settings(&dir), "projects", json!({})).unwrap_err();
         assert_eq!(error.kind, ApiErrorKind::Unauthorized);
-        assert_eq!(seen.lock().unwrap().len(), 3);
+        assert!(seen.lock().unwrap().is_empty());
     }
 
     #[test]
-    fn a_refused_new_key_is_forbidden_and_the_saved_key_stays() {
+    fn an_address_without_a_key_is_not_connected() {
         let dir = TestDir::new();
-        let (endpoint, seen) = stub(|path: &str, _: Option<&str>| match path {
-            "/key" => (403, String::new()),
-            _ => (401, String::new()),
-        });
-        storage::save(&settings(&dir), &endpoint, "old-key").unwrap();
+        std::fs::write(settings(&dir), r#"{"endpoint":{"host":"127.0.0.1","port":1}}"#).unwrap();
         let error = call(&settings(&dir), "projects", json!({})).unwrap_err();
-        assert_eq!(error.kind, ApiErrorKind::Forbidden);
-        assert_eq!(seen.lock().unwrap().len(), 2);
-        assert_eq!(storage::load(&settings(&dir)), Ok(Some((endpoint, Some("old-key".to_owned())))));
+        assert_eq!(error.kind, ApiErrorKind::NotConnected);
     }
 
     #[test]
@@ -379,80 +306,5 @@ mod tests {
             };
             assert!(!shown.contains(KEY), "case {i}: {shown}");
         }
-    }
-
-    #[test]
-    fn a_new_key_is_not_in_what_comes_back_either() {
-        let dir = TestDir::new();
-        let (endpoint, _) = stub(|path: &str, auth: Option<&str>| match path {
-            "/key" => (200, format!(r#"{{"key":"{NEW_KEY}"}}"#)),
-            _ if auth == Some(format!("Bearer {NEW_KEY}").as_str()) => data("projects", json!([auth.unwrap_or("")])),
-            _ => (401, String::new()),
-        });
-        storage::save(&settings(&dir), &endpoint, "old-key").unwrap();
-        let value = call(&settings(&dir), "projects", json!({})).unwrap();
-        assert!(!value.to_string().contains(NEW_KEY), "{value}");
-    }
-
-    #[test]
-    fn parallel_calls_that_fail_with_401_share_one_new_key() {
-        // The three calls go through one single-threaded stub; how long that takes on a busy
-        // machine must not decide the result.
-        allow_slow_requests();
-        let dir = TestDir::new();
-        let (endpoint, seen) = stub(|path: &str, auth: Option<&str>| match path {
-            "/key" => (200, format!(r#"{{"key":"{NEW_KEY}"}}"#)),
-            _ if auth == Some(format!("Bearer {NEW_KEY}").as_str()) => data("projects", json!([])),
-            _ => (401, String::new()),
-        });
-        storage::save(&settings(&dir), &endpoint, "old-key").unwrap();
-        let gateway = Gateway::default();
-        let path = settings(&dir);
-        let results = run(async {
-            let a = gateway.call(&path, "projects", None);
-            let b = gateway.call(&path, "projects", None);
-            let c = gateway.call(&path, "projects", None);
-            futures_join3(a, b, c).await
-        });
-        assert!(results.0.is_ok() && results.1.is_ok() && results.2.is_ok(), "{results:?}");
-        let keys = seen.lock().unwrap().iter().filter(|line| line.starts_with("POST /key")).count();
-        assert_eq!(keys, 1, "{:?}", seen.lock().unwrap());
-    }
-
-    /// Runs three futures to completion together (no extra crate needed for this).
-    async fn futures_join3<A, B, C>(
-        a: impl std::future::Future<Output = A>,
-        b: impl std::future::Future<Output = B>,
-        c: impl std::future::Future<Output = C>,
-    ) -> (A, B, C) {
-        let mut a = Box::pin(a);
-        let mut b = Box::pin(b);
-        let mut c = Box::pin(c);
-        let (mut ra, mut rb, mut rc) = (None, None, None);
-        std::future::poll_fn(|cx| {
-            use std::task::Poll;
-            if ra.is_none() {
-                if let Poll::Ready(v) = a.as_mut().poll(cx) {
-                    ra = Some(v);
-                }
-            }
-            if rb.is_none() {
-                if let Poll::Ready(v) = b.as_mut().poll(cx) {
-                    rb = Some(v);
-                }
-            }
-            if rc.is_none() {
-                if let Poll::Ready(v) = c.as_mut().poll(cx) {
-                    rc = Some(v);
-                }
-            }
-            if ra.is_some() && rb.is_some() && rc.is_some() {
-                Poll::Ready(())
-            } else {
-                Poll::Pending
-            }
-        })
-        .await;
-        (ra.unwrap(), rb.unwrap(), rc.unwrap())
     }
 }
