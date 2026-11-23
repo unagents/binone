@@ -11,6 +11,8 @@ The user registers a request; binone carries it forward without further instruct
   - `test-server/server.mjs`: a stand-in for the server, for checking the client by hand (test only)
   - `Casks/binone.rb`: source of the Homebrew cask
   - `scripts/release.sh`: pack the built app into a dmg, register the dmg, update the tap
+- `docs/assist.md`: the request-writing assistant (the chat on the right of the registration screen,
+  held by the user's own `claude` CLI); the other request screens still show their chat pane as not connected
 - `docs/release.md`: how to install the client with Homebrew and how to release it
 - `prototype/`: static HTML prototypes of the client screens (appearance only; dummy data).
   - `swimlane.html`: swimlane (kanban) of requests by lane

@@ -207,6 +207,17 @@ export function createSampleServer(options: SampleOptions = {}): NativeCall {
         }
         // Without Homebrew in the sample, the screen shows the manual way.
         return { state: "manual", reason: "no_brew", command: MANUAL_COMMAND, url: "https://github.com/unagents/binone/releases/latest" } satisfies UpdateOutcome;
+      case "assist_send": {
+        // A canned answer: the words "題名" / "本文" in the message make it give a new title / body.
+        const message = String(args?.message ?? "");
+        return {
+          state: "answer",
+          reply: `（見本）「${message}」を受け取りました。`,
+          title: message.includes("題名") ? "見本の題名" : null,
+          body: message.includes("本文") ? "# 見本の本文\n\n見本の文です。" : null,
+          session_id: "sample-session",
+        };
+      }
       case "restart_app":
       case "open_release_page":
         return null;
