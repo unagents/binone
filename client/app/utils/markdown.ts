@@ -29,7 +29,7 @@ const ALIGN_CLASS: Record<string, string> = { left: "md-left", center: "md-cente
 md.core.ruler.push("align_to_class", (state) => {
   for (const token of state.tokens) {
     if ((token.type !== "th_open" && token.type !== "td_open") || !token.attrs) continue;
-    const align = /^text-align:(left|center|right)$/.exec(token.attrGet("style") ?? "")?.[1];
+    const align = /^text-align:(left|center|right)$/.exec(String(token.attrGet("style") ?? ""))?.[1];
     token.attrs = token.attrs.filter(([name]) => name !== "style");
     if (align) token.attrSet("class", ALIGN_CLASS[align]!);
     if (token.attrs.length === 0) token.attrs = null;
