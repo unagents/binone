@@ -171,7 +171,7 @@ function openEditor(item: BatchItem) {
             </ul>
           </template>
           <p v-if="!failure || failure.nothingChanged" class="text-xs text-muted">この間も、何も変わっていません（全て draft のままです）。直してから「もう一度確かめる」を押すと、最新の内容で最初から確かめます。</p>
-          <p v-else class="text-xs text-warning" data-testid="submit-stuck">openspec-mcp の側で open のまま残っている依頼があります。binone の側は全て draft のままです。盤面は変わっていませんが、openspec-mcp の側を確かめてください。</p>
+          <p v-else class="text-sm font-medium text-error" data-testid="submit-stuck">次の件は openspec-mcp 側で open のまま戻せませんでした: {{ failure.stuck.map((i) => `「${titleOf(i)}」`).join("") }}。binone の側は全て draft のままです。openspec-mcp の側を確かめてください。</p>
           <div class="flex flex-wrap gap-2">
             <UButton size="sm" data-testid="submit-retry" @click="choose('retry')">もう一度確かめる</UButton>
             <UButton v-if="editTarget" size="sm" color="neutral" variant="outline" data-testid="submit-open-editor" @click="openEditor(editTarget)">登録の画面を開く（この画面は閉じます）</UButton>
