@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Capability for the main window. No store permission: the settings file holds the key and is read only by the native side.",
+  "description": "Capability for the main window. Core only, no file access: the settings file holds the key and is read only by the native side.",
   "windows": ["main"],
   "permissions": ["core:default"]
 }

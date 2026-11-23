@@ -50,7 +50,11 @@ export function useConnection() {
     }
   }
 
-  /** The user confirmed an address. */
+  /**
+   * The user confirmed an address. The native side gets a key, saves the address and the key as
+   * soon as it has the key, and then checks the connection; so a failure after the key was
+   * acquired (the check itself) leaves the new address saved, and the next start tries it again.
+   */
   async function connect(host: string, port: number | null) {
     failure.value = null;
     try {
@@ -60,7 +64,10 @@ export function useConnection() {
     }
   }
 
-  /** Back to the form to enter another address (the saved one stays until a new one works). */
+  /**
+   * Back to the form to enter another address. The saved address and key stay until a key is
+   * acquired from the new address: they are replaced at that point, before the connection check.
+   */
   function change() {
     connected.value = null;
     failure.value = null;

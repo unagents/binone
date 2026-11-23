@@ -37,7 +37,7 @@ bun install
 bun run tauri dev      # run the app
 bun run typecheck && bun run lint && bun run test
 (cd src-tauri && cargo test)
-bun run tauri build    # .app and dmg under src-tauri/target/release/bundle/
+bun run tauri build    # binone.app under src-tauri/target/release/bundle/macos/ (the dmg is made by scripts/release.sh)
 ```
 
 Node.js 20.19 or later, bun, Rust and the Xcode Command Line Tools are required.
