@@ -16,6 +16,8 @@ import type {
   ServerInfo,
   Settings,
   SettingsView,
+  SubmitBatch,
+  SubmitCheck,
   Wait,
 } from "~/types/binone";
 
@@ -32,6 +34,8 @@ export const OPERATION_NAMES = [
   "agentMcpConfig",
   "saveDraft",
   "submitRequest",
+  "checkSubmitRequest",
+  "submitRequests",
   "decideApproval",
   "answerQuestion",
   "createProject",
@@ -45,6 +49,7 @@ export type OperationName = (typeof OPERATION_NAMES)[number];
 export const MUTATIONS: readonly OperationName[] = [
   "saveDraft",
   "submitRequest",
+  "submitRequests",
   "decideApproval",
   "answerQuestion",
   "createProject",
@@ -67,6 +72,10 @@ export interface OperationTable {
   saveDraft: { args: DraftInput; result: Request };
   /** draft -> todo. `version` is the one read last. */
   submitRequest: { args: { id: string; version: number }; result: Request };
+  /** Dry run of draft -> todo: changes nothing. A refusal comes back as data. */
+  checkSubmitRequest: { args: { id: string; version: number }; result: SubmitCheck };
+  /** All of the drafts become todos in one step, or none does. A refusal comes back as data. */
+  submitRequests: { args: { items: { id: string; version: number }[] }; result: SubmitBatch };
   decideApproval: {
     args: { requestId: string; proposalRef: string; proposalVersion: number; decision: Decision };
     result: Wait[];

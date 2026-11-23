@@ -110,6 +110,22 @@ mod tests {
     }
 
     #[test]
+    fn a_refusal_of_the_check_or_the_batch_is_data_not_an_error() {
+        let check = json!({"id": "r1", "ok": false, "code": "incomplete", "missing": ["protocol"], "message": "m"});
+        let ok = interpret(Operation::CheckSubmitRequest, 200, &body(json!({"data": {"checkSubmitRequest": check.clone()}})));
+        assert_eq!(ok.unwrap(), check);
+        let batch = json!({"ok": false, "results": [check], "requests": []});
+        let ok = interpret(Operation::SubmitRequests, 200, &body(json!({"data": {"submitRequests": batch.clone()}})));
+        assert_eq!(ok.unwrap(), batch);
+        // An answer that is not an object is not taken for one.
+        let error = failed(Operation::SubmitRequests, json!({"data": {"submitRequests": true}}));
+        assert_eq!(error.kind, ApiErrorKind::BadResponse);
+        // A server without the operation is told apart from a broken one.
+        let error = failed(Operation::CheckSubmitRequest, json!({"errors": [{"message": r#"Unknown field "checkSubmitRequest" on type "Query""#}]}));
+        assert_eq!(error.kind, ApiErrorKind::Unsupported);
+    }
+
+    #[test]
     fn each_server_error_code_has_its_own_kind() {
         let cases = [
             ("INVALID_INPUT", ApiErrorKind::InvalidInput),

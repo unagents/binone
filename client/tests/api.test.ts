@@ -116,6 +116,29 @@ describe("the sample server", () => {
     const submitted = (await call(server, "submitRequest", { id: draft.id, version: updated.version })) as { lane: string };
     expect(submitted.lane).toBe("todo");
   });
+  it("checks a draft without changing it, and submits a batch all or nothing", async () => {
+    const server = createSampleServer();
+    const save = async (title: string, protocol: string) =>
+      (await call(server, "saveDraft", { title, project: "binone", kind: "task", protocol })) as { id: string; version: number };
+    const good = await save("a", "p");
+    const bad = await save("b", "");
+    const listed = (await call(server, "requests", {})) as { id: string; version: number }[];
+    expect(listed.find((r) => r.id === good.id)?.version).toBe(good.version);
+
+    expect(await call(server, "checkSubmitRequest", { id: good.id, version: good.version })).toMatchObject({ ok: true, code: null });
+    expect(await call(server, "checkSubmitRequest", { id: bad.id, version: bad.version })).toMatchObject({ ok: false, code: "incomplete", missing: ["protocol"] });
+    expect(await call(server, "checkSubmitRequest", { id: good.id, version: good.version + 9 })).toMatchObject({ code: "version_conflict" });
+    expect(await call(server, "checkSubmitRequest", { id: "nope", version: 1 })).toMatchObject({ code: "not_found" });
+
+    const refused = (await call(server, "submitRequests", { items: [good, bad].map(({ id, version }) => ({ id, version })) })) as { ok: boolean; requests: unknown[] };
+    expect(refused.ok).toBe(false);
+    expect(await call(server, "checkSubmitRequest", { id: good.id, version: good.version })).toMatchObject({ ok: true });
+    const done = (await call(server, "submitRequests", { items: [{ id: good.id, version: good.version }] })) as { ok: boolean; requests: { lane: string }[] };
+    expect(done.ok).toBe(true);
+    expect(done.requests.map((r) => r.lane)).toEqual(["todo"]);
+    expect(await call(server, "checkSubmitRequest", { id: good.id, version: good.version + 1 })).toMatchObject({ code: "not_draft" });
+    await expect(call(server, "submitRequests", { items: [] })).rejects.toMatchObject({ kind: "invalid_input" });
+  });
   it("keeps draft first in the settings", async () => {
     const server = createSampleServer();
     const view = (await call(server, "settings")) as { settings: { lanes: { name: string }[] } };

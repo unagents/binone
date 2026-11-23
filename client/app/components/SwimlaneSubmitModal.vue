@@ -1,20 +1,36 @@
 <script setup lang="ts">
-// The modal of "draft -> todo": handles the grabbed drafts one at a time, shows the title being
-// handled, and when the server refuses one, shows why and lets the user skip it or stop.
-import { describeApiError, type ApiError } from "~/utils/api/errors";
-import { runSubmitBatch, summarizeBatch, type BatchEntry, type BatchItem, type StopChoice } from "~/utils/swimlaneSubmit";
+// The modal of "draft -> todo". It checks the grabbed drafts one at a time (a dry run that changes
+// nothing) and shows the title being checked. A draft that does not pass stops it with the reason;
+// the user fixes it elsewhere and checks again, or aborts. When every draft has passed, one call
+// turns them all into todos. Until that call is made, closing the modal changes nothing; from then
+// on it cannot be closed until the answer is shown, and the board is read again after that.
+import { describeApiError } from "~/utils/api/errors";
+import type { SubmitBatch } from "~/types/binone";
+import { requestRoute } from "~/utils/routes";
+import {
+  describeMissing,
+  describeSubmitCode,
+  runSubmitFlow,
+  type BatchItem,
+  type StopChoice,
+  type StopProblem,
+  type SubmitFlowOutcome,
+} from "~/utils/swimlaneSubmit";
 
 const props = defineProps<{ items: BatchItem[] }>();
-// `changed` is true when at least one draft became a todo (the board must be read again).
-const emit = defineEmits<{ close: [changed: boolean] }>();
+const emit = defineEmits<{
+  close: [];
+  /** A call that may have changed something was made and answered: read the board again. */
+  settled: [];
+}>();
 
 const api = useApi();
 const open = ref(true);
+const phase = ref<"checking" | "stopped" | "submitting" | "done">("checking");
 const current = ref<BatchItem | null>(null);
 const position = ref(0);
-const stopped = ref<{ item: BatchItem; error: ApiError } | null>(null);
-const result = ref<{ entries: BatchEntry[]; interrupted: boolean } | null>(null);
-const changed = ref(false);
+const stopped = ref<StopProblem | null>(null);
+const outcome = ref<SubmitFlowOutcome | null>(null);
 let closed = false;
 let answer: ((choice: StopChoice) => void) | null = null;
 
@@ -22,101 +38,142 @@ function choose(choice: StopChoice) {
   const resolve = answer;
   answer = null;
   stopped.value = null;
+  if (choice === "retry") phase.value = "checking";
   resolve?.(choice);
-}
-
-// The board is read again only when no call is in flight: a call sent before the modal was
-// closed may still turn a draft into a todo, so `close` waits for the batch to end.
-let finished = false;
-let emitted = false;
-function emitClose() {
-  if (emitted) return;
-  emitted = true;
-  emit("close", changed.value);
 }
 
 function close() {
   closed = true;
   choose("abort");
-  if (finished) emitClose();
+  emit("close");
 }
 
 watch(open, (value) => {
   if (!value) close();
 });
+// A way out of the screen (the sidebar) is refused while the call is in flight: its answer is shown here.
+onBeforeRouteLeave(() => phase.value !== "submitting");
+onBeforeUnmount(() => {
+  closed = true;
+  answer?.("abort");
+});
 
-async function submit(item: BatchItem) {
-  const request = await api.request(item.id);
-  if (request.lane !== "draft") throw { kind: "conflict", detail: `いまの状態は ${request.lane} です（draft ではありません）` } satisfies ApiError;
-  await api.submitRequest(item.id, request.version);
-  changed.value = true;
+/** The list is read again: the versions and titles as they are now. A draft not in it keeps what it had. */
+async function reread(items: readonly BatchItem[]): Promise<BatchItem[]> {
+  const rows = new Map((await api.requests({})).map((row) => [row.id, row]));
+  return items.map((item) => {
+    const row = rows.get(item.id);
+    return row ? { id: item.id, title: row.title, version: row.version } : item;
+  });
 }
 
 onMounted(async () => {
-  result.value = await runSubmitBatch(props.items, {
-    submit,
-    onStart: (item, index) => {
+  outcome.value = await runSubmitFlow(props.items, {
+    check: (item) => api.checkSubmitRequest(item.id, item.version),
+    submit: (items): Promise<SubmitBatch> => api.submitRequests(items.map(({ id, version }) => ({ id, version }))),
+    reread,
+    onChecking: (item, index) => {
       current.value = item;
-      position.value = index + 1;
+      position.value = index;
+      phase.value = "checking";
     },
-    onStop: (item, error) =>
+    onSubmitting: () => {
+      phase.value = "submitting";
+    },
+    onStop: (problem) =>
       new Promise<StopChoice>((resolve) => {
         answer = resolve;
-        stopped.value = { item, error };
+        stopped.value = problem;
+        phase.value = "stopped";
       }),
     isClosed: () => closed,
   });
   current.value = null;
-  finished = true;
-  if (closed) emitClose();
+  if (outcome.value.status === "left") {
+    // Nothing was called that could change anything; the modal is already closed or is closed now.
+    if (!closed) close();
+    return;
+  }
+  phase.value = "done";
+  // The answer is on screen first; then the board is read again.
+  await nextTick();
+  emit("settled");
 });
 
-const summary = computed(() => (result.value ? summarizeBatch(result.value.entries) : null));
-const statusLabel: Record<string, string> = { todo: "todo にしました", skipped: "飛ばしました（draft のまま）", unknown: "受け付けられたか不明です（draft のままとは限りません）", left: "draft のまま" };
+const refusal = computed(() => (stopped.value?.kind === "refused" ? stopped.value.check : null));
+const errorText = computed(() => {
+  const o = outcome.value;
+  if (stopped.value?.kind === "error") return stopped.value.error;
+  return o && (o.status === "failed" || o.status === "unknown") ? o.error : null;
+});
+const count = computed(() => (outcome.value?.status === "submitted" ? outcome.value.batch.requests.length || props.items.length : 0));
+const canClose = computed(() => phase.value !== "submitting");
+
+function openEditor(item: BatchItem) {
+  // Leaving this screen closes the modal; nothing has been changed yet.
+  void navigateTo(requestRoute({ id: item.id, lane: "draft" }));
+}
 </script>
 
 <template>
-  <UModal v-model:open="open" title="todo にする" :dismissible="true" :ui="{ content: 'max-w-lg' }">
+  <UModal v-model:open="open" title="todo にする" :dismissible="canClose" :close="canClose" :ui="{ content: 'max-w-lg' }">
     <template #body>
       <div class="flex flex-col gap-4" data-testid="submit-modal">
         <p class="text-xs text-muted">エージェントの点検は未接続のため、サーバーの検証だけ行います。</p>
 
-        <div v-if="!result && !stopped" class="flex items-center gap-3" data-testid="submit-running">
+        <div v-if="phase === 'checking'" class="flex items-center gap-3" data-testid="submit-running">
           <UIcon name="i-lucide-loader-circle" class="size-5 animate-spin text-primary" />
           <div class="min-w-0">
-            <p class="text-sm text-highlighted">{{ position }} / {{ items.length }} 件目を処理しています</p>
+            <p class="text-sm text-highlighted">{{ position }} / {{ items.length }} 件目を確かめています</p>
             <p class="truncate text-sm text-muted" data-testid="submit-current">{{ current?.title }}</p>
           </div>
         </div>
 
+        <div v-if="phase === 'submitting'" class="flex items-center gap-3" data-testid="submit-sending">
+          <UIcon name="i-lucide-loader-circle" class="size-5 animate-spin text-primary" />
+          <div class="min-w-0">
+            <p class="text-sm text-highlighted">{{ items.length }} 件を todo にしています</p>
+            <p class="text-xs text-muted">答えが返るまで、この画面は閉じられません。</p>
+          </div>
+        </div>
+
         <div v-if="stopped" class="flex flex-col gap-3 rounded-lg border border-warning/50 bg-warning/10 p-3" data-testid="submit-stopped">
-          <p class="text-sm font-medium text-highlighted">「{{ stopped.item.title }}」は todo にできませんでした</p>
-          <p class="text-sm text-default">{{ describeApiError(stopped.error.kind).title }}</p>
-          <p class="text-xs break-words text-muted" data-testid="submit-reason">{{ stopped.error.detail }}</p>
-          <p v-if="stopped.error.kind === 'outcome_unknown'" class="text-xs text-muted">自動では送り直しません。一覧を読み込み直して結果を確かめてください。</p>
-          <div class="flex gap-2">
-            <UButton size="sm" color="neutral" variant="outline" data-testid="submit-skip" @click="choose('skip')">この 1 件を飛ばす</UButton>
+          <template v-if="refusal && stopped.kind === 'refused'">
+            <p class="text-sm font-medium text-highlighted">「{{ stopped.item.title || "（題名なし）" }}」は todo にできません</p>
+            <p class="text-sm text-default" data-testid="submit-code"><code class="rounded bg-elevated px-1 text-xs">{{ refusal.code }}</code> {{ describeSubmitCode(refusal.code) }}</p>
+            <p v-if="refusal.missing.length" class="text-sm text-default" data-testid="submit-missing">足りない項目: {{ describeMissing(refusal.missing).join("、") }}</p>
+            <p v-if="refusal.message" class="text-xs break-words text-muted" data-testid="submit-reason">{{ refusal.message }}</p>
+          </template>
+          <template v-else-if="stopped.kind === 'error'">
+            <p class="text-sm font-medium text-highlighted">{{ stopped.item ? `「${stopped.item.title || "（題名なし）"}」を確かめられませんでした` : "読み込み直せませんでした" }}</p>
+            <p class="text-sm text-default">{{ describeApiError(stopped.error.kind).title }}</p>
+            <p class="text-xs break-words text-muted" data-testid="submit-reason">{{ stopped.error.detail }}</p>
+          </template>
+          <p class="text-xs text-muted">この間も、何も変わっていません（全て draft のままです）。直してから「もう一度確かめる」を押すと、最新の内容で最初から確かめます。</p>
+          <div class="flex flex-wrap gap-2">
+            <UButton size="sm" data-testid="submit-retry" @click="choose('retry')">もう一度確かめる</UButton>
+            <UButton v-if="stopped.item" size="sm" color="neutral" variant="outline" data-testid="submit-open-editor" @click="openEditor(stopped.item)">登録の画面を開く（この画面は閉じます）</UButton>
             <UButton size="sm" color="error" variant="soft" data-testid="submit-abort" @click="choose('abort')">中断</UButton>
           </div>
         </div>
 
-        <div v-if="result && summary" class="flex flex-col gap-2" data-testid="submit-result">
-          <p class="text-sm text-highlighted">
-            {{ result.interrupted ? "中断しました" : "終わりました" }}: todo {{ summary.todo }} 件、飛ばした {{ summary.skipped }} 件、不明 {{ summary.unknown }} 件、draft のまま {{ summary.left }} 件
-          </p>
-          <ul class="divide-y divide-default rounded-lg border border-default text-sm">
-            <li v-for="entry in result.entries" :key="entry.id" class="flex flex-col gap-0.5 px-3 py-2">
-              <span class="truncate text-highlighted">{{ entry.title }}</span>
-              <span class="text-xs text-muted">{{ statusLabel[entry.status] }}<template v-if="entry.reason">: {{ entry.reason.detail }}</template></span>
-            </li>
-          </ul>
+        <div v-if="phase === 'done' && outcome" class="flex flex-col gap-2" data-testid="submit-result">
+          <p v-if="outcome.status === 'submitted'" class="text-sm text-highlighted" data-testid="submit-success">{{ count }} 件を todo にしました。</p>
+          <template v-else-if="errorText">
+            <p class="text-sm font-medium text-highlighted" data-testid="submit-failure">
+              {{ outcome.status === "unknown" ? "受け付けられたか分かりません" : "todo にできませんでした" }}
+            </p>
+            <p class="text-sm text-default">{{ describeApiError(errorText.kind).title }}</p>
+            <p class="text-xs break-words text-muted" data-testid="submit-reason">{{ errorText.detail }}</p>
+            <p v-if="outcome.status === 'unknown'" class="text-xs text-muted">自動では送り直しません。盤面を読み直しているので、draft か todo かを見て確かめてください。</p>
+            <p v-else class="text-xs text-muted">盤面を読み直しています。変わっていない物は draft のままです。</p>
+          </template>
         </div>
-        <p v-if="!result" class="text-xs text-muted" data-testid="submit-close-note">途中で閉じると、まだ処理していない draft は draft のまま残ります。すでに todo になった物は戻りません。</p>
       </div>
     </template>
     <template #footer>
       <div class="flex w-full justify-end">
-        <UButton color="neutral" variant="outline" size="sm" data-testid="submit-close" @click="open = false">{{ result ? "閉じる" : "閉じて中断" }}</UButton>
+        <UButton color="neutral" variant="outline" size="sm" :disabled="!canClose" data-testid="submit-close" @click="open = false">{{ phase === "done" ? "閉じる" : "閉じて中断" }}</UButton>
       </div>
     </template>
   </UModal>

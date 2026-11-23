@@ -8,6 +8,7 @@ import {
   filterChoices,
   foldedLane,
   groupItems,
+  isLanePinned,
   normalizeHidden,
   parseView,
   sortItems,
@@ -17,7 +18,7 @@ import {
 const lanes: LaneDef[] = ["draft", "todo", "prepare", "doing", "done", "archive"].map((name) => ({ name, label: null }));
 
 function card(id: string, over: Partial<RequestSummary> = {}): RequestSummary {
-  return { id, title: id, project: "binone", kind: "task", tags: [], lane: "draft", currentStep: null, updatedMs: 1000, ...over };
+  return { id, version: 1, title: id, project: "binone", kind: "task", tags: [], lane: "draft", currentStep: null, updatedMs: 1000, ...over };
 }
 
 const items = [
@@ -136,6 +137,18 @@ describe("the draft lane is pinned by name too", () => {
     expect(visibleLanes(shifted, ["draft", "doing"]).map((l) => l.name)).toEqual(["todo", "draft"]);
     expect(normalizeHidden(shifted, ["todo", "draft", "doing"])).toEqual(["doing"]);
     expect(foldedLane(shifted, ["draft"], "draft")).toBe("draft");
+  });
+});
+
+describe("isLanePinned", () => {
+  it("is true for the first lane and for the lane named draft, whatever its place", () => {
+    expect(isLanePinned(lanes, "draft")).toBe(true);
+    expect(isLanePinned(lanes, "todo")).toBe(false);
+    const shifted: LaneDef[] = ["todo", "draft", "doing"].map((name) => ({ name, label: null }));
+    expect(isLanePinned(shifted, "draft")).toBe(true);
+    expect(isLanePinned(shifted, "todo")).toBe(true);
+    expect(isLanePinned(shifted, "doing")).toBe(false);
+    expect(isLanePinned(shifted, "ghost")).toBe(false);
   });
 });
 

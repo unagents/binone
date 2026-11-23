@@ -9,6 +9,7 @@ import {
   newestFirst,
   stepStatusText,
 } from "~/utils/requests";
+import { requestRoute } from "~/utils/routes";
 
 const route = useRoute();
 const api = useApi();
@@ -34,7 +35,7 @@ const editable = computed(() => (detail.value ? canEditDraft(detail.value) : fal
       <ScreenFrame :title="detail?.request.title || '依頼の状況'" description="依頼の中身、レーン、protocol の手順、履歴。" wide>
         <template #actions>
           <UButton color="neutral" variant="outline" size="sm" to="/requests">一覧へ</UButton>
-          <UButton v-if="editable" size="sm" :to="`/requests/new?id=${encodeURIComponent(id)}`" data-testid="edit-draft">登録の画面で編集</UButton>
+          <UButton v-if="editable" size="sm" :to="requestRoute({ id, lane: detail?.lane ?? '' })" data-testid="edit-draft">登録の画面で編集</UButton>
           <UButton color="neutral" variant="outline" size="sm" :loading="loading" data-testid="reload" @click="reload">読み込み直す</UButton>
         </template>
 
@@ -58,7 +59,10 @@ const editable = computed(() => (detail.value ? canEditDraft(detail.value) : fal
               <div><dt class="text-xs text-muted">登録</dt><dd class="text-default">{{ formatDateTime(detail.request.created_ms) }}</dd></div>
               <div><dt class="text-xs text-muted">更新</dt><dd class="text-default">{{ formatDateTime(detail.request.updated_ms) }}</dd></div>
             </dl>
-            <pre class="mt-4 border-t border-default pt-3 font-sans text-sm leading-relaxed whitespace-pre-wrap break-words text-default" data-testid="request-body">{{ detail.request.body || "（本文なし）" }}</pre>
+            <div class="mt-4 border-t border-default pt-3 text-default" data-testid="request-body">
+              <MarkdownView v-if="detail.request.body" :source="detail.request.body" />
+              <p v-else class="text-sm text-muted">（本文なし）</p>
+            </div>
           </section>
 
           <UAlert

@@ -344,6 +344,13 @@ mod tests {
         let error = call(&settings(&dir), "requests", json!({})).unwrap_err();
         assert_eq!(error.kind, ApiErrorKind::Unreachable);
         assert_eq!(*connections.lock().unwrap(), 2);
+
+        // The batch is a change too: no answer is "unknown" and it is sent once. The check is a query.
+        let batch = json!({ "items": [{ "id": "r1", "version": 1 }] });
+        assert_eq!(call(&settings(&dir), "submitRequests", batch).unwrap_err().kind, ApiErrorKind::OutcomeUnknown);
+        assert_eq!(*connections.lock().unwrap(), 3);
+        let error = call(&settings(&dir), "checkSubmitRequest", json!({ "id": "r1", "version": 1 })).unwrap_err();
+        assert_eq!(error.kind, ApiErrorKind::Unreachable);
     }
 
     #[test]

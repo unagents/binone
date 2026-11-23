@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { formatDateTime, relativeTime } from "~/utils/requests";
+import { requestRoute } from "~/utils/routes";
 import type { RequestSummary } from "~/types/binone";
 
 const api = useApi();
@@ -25,14 +26,14 @@ watch(project, () => void reload());
 const now = Date.now();
 
 function open(row: RequestSummary) {
-  void navigateTo(`/requests/${row.id}`);
+  void navigateTo(requestRoute(row));
 }
 </script>
 
 <template>
   <div class="flex h-full min-h-0">
     <div class="min-w-0 flex-1 overflow-y-auto">
-      <ScreenFrame title="依頼の一覧" description="依頼とその状態（レーン）。選ぶと依頼の状況を開きます。" wide>
+      <ScreenFrame title="依頼の一覧" description="依頼とその状態（レーン）。選ぶと依頼の状況（draft は登録の画面）を開きます。" wide>
         <template #actions>
           <USelect v-model="project" :items="projectItems" size="sm" class="w-48" aria-label="プロジェクトで絞る" data-testid="project-filter" />
           <UButton color="neutral" variant="outline" size="sm" :loading="loading" data-testid="reload" @click="reload">読み込み直す</UButton>

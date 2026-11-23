@@ -13,6 +13,7 @@ import type {
   RequestFilter,
   RequestSummary,
   SettingsView,
+  SubmitCheck,
 } from "~/types/binone";
 import type { NativeCall } from "~/utils/api/transport";
 
@@ -62,7 +63,7 @@ export function createSampleServer(options: SampleOptions = {}): NativeCall {
   ];
 
   function summary(r: Request): RequestSummary {
-    return { id: r.id, title: r.title, project: r.project, kind: r.kind, tags: r.tags, lane: r.lane, currentStep: r.lane === "doing" ? "実装" : null, updatedMs: r.updatedMs };
+    return { id: r.id, version: r.version, title: r.title, project: r.project, kind: r.kind, tags: r.tags, lane: r.lane, currentStep: r.lane === "doing" ? "実装" : null, updatedMs: r.updatedMs };
   }
 
   function find(id: string): Request {
@@ -98,6 +99,17 @@ export function createSampleServer(options: SampleOptions = {}): NativeCall {
     };
   }
 
+  /** What the server's judgment says about a draft (title, project, protocol must be set). */
+  function judge(id: string, version: unknown): SubmitCheck {
+    const refuse = (code: NonNullable<SubmitCheck["code"]>, missing: string[] = [], message: string = code): SubmitCheck => ({ id, ok: false, code, missing, message });
+    const current = requests.find((r) => r.id === id);
+    if (!current) return refuse("not_found");
+    if (current.lane !== "draft") return refuse("not_draft");
+    if (current.version !== version) return refuse("version_conflict");
+    const missing = [current.title.trim() === "" ? "title" : "", current.project.trim() === "" ? "project" : "", current.protocol ? "" : "protocol"].filter(Boolean);
+    return missing.length > 0 ? refuse("incomplete", missing, `request ${id} cannot become a todo yet: missing ${missing.join(", ")}`) : { id, ok: true, code: null, missing: [], message: "" };
+  }
+
   const operations: Record<OperationName, (args: Record<string, unknown>) => unknown> = {
     serverInfo: () => ({ version: "sample" }),
     requests: (a) => filtered(a.filter as RequestFilter | null | undefined),
@@ -114,12 +126,13 @@ export function createSampleServer(options: SampleOptions = {}): NativeCall {
       if (id === null) {
         const created = sample(`req_${nextId++}`, String(a.title ?? ""), String(a.project ?? ""), String(a.kind ?? ""), (a.tags as string[] | undefined) ?? [], "draft", Date.now());
         created.body = String(a.body ?? "");
+        created.protocol = typeof a.protocol === "string" && a.protocol !== "" ? a.protocol : null;
         requests.push(created);
         return created;
       }
       const current = find(id);
       if (current.version !== a.version) fail("conflict", "version moved on");
-      Object.assign(current, { title: String(a.title ?? ""), body: String(a.body ?? ""), project: String(a.project ?? ""), kind: String(a.kind ?? ""), tags: (a.tags as string[] | undefined) ?? [], version: current.version + 1, updatedMs: Date.now() });
+      Object.assign(current, { title: String(a.title ?? ""), body: String(a.body ?? ""), project: String(a.project ?? ""), kind: String(a.kind ?? ""), tags: (a.tags as string[] | undefined) ?? [], protocol: typeof a.protocol === "string" && a.protocol !== "" ? a.protocol : null, version: current.version + 1, updatedMs: Date.now() });
       return current;
     },
     submitRequest: (a) => {
@@ -128,6 +141,19 @@ export function createSampleServer(options: SampleOptions = {}): NativeCall {
       if (current.lane !== "draft") fail("conflict", "not a draft");
       Object.assign(current, { lane: "todo", version: current.version + 1, updatedMs: Date.now() });
       return current;
+    },
+    checkSubmitRequest: (a) => judge(String(a.id), a.version),
+    submitRequests: (a) => {
+      const items = (a.items as { id: string; version: number }[] | undefined) ?? [];
+      if (items.length === 0) fail("invalid_input", "no items");
+      const results = items.map((item) => judge(item.id, item.version));
+      if (!results.every((r) => r.ok)) return { ok: false, results, requests: [] };
+      const done = items.map((item) => {
+        const current = find(item.id);
+        Object.assign(current, { lane: "todo", version: current.version + 1, updatedMs: Date.now() });
+        return current;
+      });
+      return { ok: true, results, requests: done };
     },
     decideApproval: () => [],
     answerQuestion: () => true,

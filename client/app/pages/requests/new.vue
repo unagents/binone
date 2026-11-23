@@ -12,6 +12,7 @@ import {
   type DraftBase,
   type DraftForm,
 } from "~/utils/requests";
+import { requestRoute } from "~/utils/routes";
 import { validateProjectName } from "~/utils/settings";
 
 // One screen for a new request and for a draft being edited (`/requests/new?id=<id>`). The version
@@ -37,6 +38,8 @@ const conflict = ref(false);
 const busy = ref<"save" | "submit" | "reload" | "overwrite" | null>(null);
 const problems = ref<string[]>([]);
 const tagText = ref("");
+// The body is written as text; the preview shows it formatted (raw HTML, images and links are not shown as such).
+const previewing = ref(false);
 
 const dirty = computed(() => !sameForm(form, savedForm.value));
 const editable = computed(() => lane.value === "draft");
@@ -141,8 +144,7 @@ async function onSubmit() {
   const saved = !base.value || dirty.value ? await save() : { id: base.value.id, version: base.value.version };
   if (saved) {
     try {
-      await api.submitRequest(saved.id, saved.version);
-      await navigateTo(`/requests/${saved.id}`);
+      await navigateTo(requestRoute(await api.submitRequest(saved.id, saved.version)));
     } catch (e) {
       fail(e);
     }
@@ -234,7 +236,7 @@ async function createProject() {
         <template v-if="!loading && !loadError">
           <UAlert v-if="!editable" color="warning" variant="subtle" title="この依頼は draft ではないので編集できません" data-testid="not-draft">
             <template #description>
-              <NuxtLink :to="`/requests/${base?.id}`" class="underline">依頼の状況を開く</NuxtLink>
+              <NuxtLink :to="requestRoute({ id: base?.id ?? '', lane: lane })" class="underline">依頼の状況を開く</NuxtLink>
             </template>
           </UAlert>
 
@@ -284,7 +286,15 @@ async function createProject() {
               </UFormField>
             </div>
 
-            <UTextarea v-model="form.body" :rows="14" autoresize class="w-full" placeholder="作業指示を Markdown で書く" aria-label="作業指示（Markdown）" data-testid="body" />
+            <div class="flex items-center gap-2">
+              <UButton type="button" size="xs" :variant="previewing ? 'outline' : 'solid'" color="neutral" data-testid="body-edit" @click="previewing = false">書く</UButton>
+              <UButton type="button" size="xs" :variant="previewing ? 'solid' : 'outline'" color="neutral" data-testid="body-preview-toggle" @click="previewing = true">プレビュー</UButton>
+            </div>
+            <div v-if="previewing" class="min-h-48 rounded-md border border-default p-3" data-testid="body-preview">
+              <MarkdownView v-if="form.body.trim() !== ''" :source="form.body" />
+              <p v-else class="text-sm text-muted">（本文なし）</p>
+            </div>
+            <UTextarea v-else v-model="form.body" :rows="14" autoresize class="w-full" placeholder="作業指示を Markdown で書く" aria-label="作業指示（Markdown）" data-testid="body" />
           </fieldset>
         </template>
       </ScreenFrame>

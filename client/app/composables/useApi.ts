@@ -30,6 +30,8 @@ export function useApi() {
     agentMcpConfig: () => callApi("agentMcpConfig"),
     saveDraft: (draft: ArgsOf<"saveDraft">) => callApi("saveDraft", draft),
     submitRequest: (id: string, version: number) => callApi("submitRequest", { id, version }),
+    checkSubmitRequest: (id: string, version: number) => callApi("checkSubmitRequest", { id, version }),
+    submitRequests: (items: ArgsOf<"submitRequests">["items"]) => callApi("submitRequests", { items }),
     decideApproval: (args: ArgsOf<"decideApproval">) => callApi("decideApproval", args),
     answerQuestion: (args: ArgsOf<"answerQuestion">) => callApi("answerQuestion", args),
     createProject: (name: string) => callApi("createProject", { name }),

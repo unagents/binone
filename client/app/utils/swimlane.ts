@@ -1,6 +1,10 @@
 // The swimlane's rules, kept apart from the screen: filtering, ordering, folding hidden lanes
 // into the lane before them, and grouping. Plain functions on plain data, so they can be tested.
 import type { LaneDef, LaneName, RequestSummary } from "~/types/binone";
+import { DRAFT_LANE, requestRoute } from "~/utils/routes";
+
+/** Where a press on a card goes. The same rule as `requestRoute`, which the other screens use too. */
+export const cardRoute = requestRoute;
 
 export interface SwimlaneFilter {
   /** One project, or none. */
@@ -49,16 +53,15 @@ export function sortItems(items: readonly RequestSummary[], order: SwimlaneOrder
   });
 }
 
-const PINNED_LANE = "draft";
 
 /** The first lane and the lane named `draft` are always shown. */
 function isPinned(lanes: readonly LaneDef[], index: number): boolean {
-  return index === 0 || lanes[index]?.name === PINNED_LANE;
+  return index === 0 || lanes[index]?.name === DRAFT_LANE;
 }
 
-/** Where a press on a card goes: a draft to the registration screen (edit), the rest to the status. */
-export function cardRoute(item: Pick<RequestSummary, "id" | "lane">): string {
-  return item.lane === PINNED_LANE ? `/requests/new?id=${encodeURIComponent(item.id)}` : `/requests/${encodeURIComponent(item.id)}`;
+/** Whether the lane cannot be hidden (the menu shows it checked and disabled). */
+export function isLanePinned(lanes: readonly LaneDef[], name: LaneName): boolean {
+  return lanes.some((lane, index) => lane.name === name && isPinned(lanes, index));
 }
 
 /** The lanes to draw: the configured ones minus the hidden ones. The first lane is always kept. */

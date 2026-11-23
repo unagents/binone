@@ -56,6 +56,8 @@ export interface Request {
 /** A row of the request list. `lane` is the real lane: folding hidden lanes is the client's job. */
 export interface RequestSummary {
   id: string;
+  /** The version read: send it back as the `version` of the check and the batch. */
+  version: number;
   title: string;
   project: string;
   kind: string;
@@ -63,6 +65,28 @@ export interface RequestSummary {
   lane: LaneName;
   currentStep: string | null;
   updatedMs: number;
+}
+
+/** Why a draft cannot become a todo. `message` is the server's sentence; `missing` is for `incomplete`. */
+export type SubmitCode = "not_found" | "not_draft" | "version_conflict" | "incomplete";
+
+/** The dry run of draft -> todo. A refusal is data (`ok: false`), not an error. */
+export interface SubmitCheck {
+  id: string;
+  ok: boolean;
+  code: SubmitCode | null;
+  /** The fields still missing (`title`, `project`, `protocol`), only for `incomplete`. */
+  missing: string[];
+  message: string;
+}
+
+/** The batch: all pass and all become todo in one step, or nothing is written (`results` say why). */
+export interface SubmitBatch {
+  ok: boolean;
+  /** One per item, in the order sent. */
+  results: SubmitCheck[];
+  /** The requests as they are now; only when `ok`. */
+  requests: Request[];
 }
 
 export type OrderBy = "UPDATED_DESC" | "UPDATED_ASC" | "PROJECT_ASC" | "PROJECT_DESC";

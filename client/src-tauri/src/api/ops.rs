@@ -32,6 +32,8 @@ pub enum Operation {
     AgentMcpConfig,
     SaveDraft,
     SubmitRequest,
+    CheckSubmitRequest,
+    SubmitRequests,
     DecideApproval,
     AnswerQuestion,
     CreateProject,
@@ -78,7 +80,7 @@ impl Prepared {
 }
 
 impl Operation {
-    pub const ALL: [Operation; 17] = [
+    pub const ALL: [Operation; 19] = [
         Operation::ServerInfo,
         Operation::Requests,
         Operation::Request,
@@ -91,6 +93,8 @@ impl Operation {
         Operation::AgentMcpConfig,
         Operation::SaveDraft,
         Operation::SubmitRequest,
+        Operation::CheckSubmitRequest,
+        Operation::SubmitRequests,
         Operation::DecideApproval,
         Operation::AnswerQuestion,
         Operation::CreateProject,
@@ -113,6 +117,8 @@ impl Operation {
             Operation::AgentMcpConfig => "agentMcpConfig",
             Operation::SaveDraft => "saveDraft",
             Operation::SubmitRequest => "submitRequest",
+            Operation::CheckSubmitRequest => "checkSubmitRequest",
+            Operation::SubmitRequests => "submitRequests",
             Operation::DecideApproval => "decideApproval",
             Operation::AnswerQuestion => "answerQuestion",
             Operation::CreateProject => "createProject",
@@ -134,6 +140,7 @@ impl Operation {
             self,
             Operation::SaveDraft
                 | Operation::SubmitRequest
+                | Operation::SubmitRequests
                 | Operation::DecideApproval
                 | Operation::AnswerQuestion
                 | Operation::CreateProject
@@ -152,6 +159,8 @@ impl Operation {
             | Operation::AgentMcpConfig
             | Operation::SaveDraft
             | Operation::SubmitRequest
+            | Operation::CheckSubmitRequest
+            | Operation::SubmitRequests
             | Operation::UpdateSettings => Shape::Object,
             Operation::Requests | Operation::Notifications | Operation::Projects | Operation::DecideApproval => {
                 Shape::Array
@@ -166,7 +175,7 @@ impl Operation {
         let f = REQUEST_FIELDS;
         match self {
             Operation::ServerInfo => "query { serverInfo { version } }".to_owned(),
-            Operation::Requests => "query($filter: RequestFilter) { requests(filter: $filter) { id title project kind tags lane currentStep updatedMs } }".to_owned(),
+            Operation::Requests => "query($filter: RequestFilter) { requests(filter: $filter) { id version title project kind tags lane currentStep updatedMs } }".to_owned(),
             Operation::Request => format!("query($id: String!) {{ request(id: $id) {{ {f} }} }}"),
             Operation::RequestDetail => "query($id: String!) { requestDetail(id: $id) }".to_owned(),
             Operation::Artifact => "query($requestId: String!, $artifactRef: String!) { artifact(requestId: $requestId, artifactRef: $artifactRef) }".to_owned(),
@@ -177,6 +186,8 @@ impl Operation {
             Operation::AgentMcpConfig => "query { agentMcpConfig }".to_owned(),
             Operation::SaveDraft => format!("mutation($input: SaveDraftInput!) {{ saveDraft(input: $input) {{ {f} }} }}"),
             Operation::SubmitRequest => format!("mutation($id: String!, $version: Int!) {{ submitRequest(id: $id, version: $version) {{ {f} }} }}"),
+            Operation::CheckSubmitRequest => "query($id: String!, $version: Int!) { checkSubmitRequest(id: $id, version: $version) { id ok code missing message } }".to_owned(),
+            Operation::SubmitRequests => format!("mutation($items: [SubmitItemInput!]!) {{ submitRequests(items: $items) {{ ok results {{ id ok code missing message }} requests {{ {f} }} }} }}"),
             Operation::DecideApproval => "mutation($requestId: String!, $proposalRef: String!, $proposalVersion: Int!, $decision: JSON!) { decideApproval(requestId: $requestId, proposalRef: $proposalRef, proposalVersion: $proposalVersion, decision: $decision) }".to_owned(),
             Operation::AnswerQuestion => "mutation($requestId: String!, $questionId: String!, $choice: String!) { answerQuestion(requestId: $requestId, questionId: $questionId, choice: $choice) }".to_owned(),
             Operation::CreateProject => "mutation($name: String!) { createProject(name: $name) }".to_owned(),
@@ -229,6 +240,17 @@ impl Operation {
             Operation::SubmitRequest => {
                 let SubmitArgs { id, version } = parse(self, args)?;
                 Ok(json!({ "id": id, "version": version }))
+            }
+            Operation::CheckSubmitRequest => {
+                let SubmitArgs { id, version } = parse(self, args)?;
+                Ok(json!({ "id": id, "version": version }))
+            }
+            Operation::SubmitRequests => {
+                let SubmitBatchArgs { items } = parse(self, args)?;
+                if items.is_empty() {
+                    return Err(ApiError::new(ApiErrorKind::InvalidInput, "submitRequests: no items"));
+                }
+                Ok(json!({ "items": items }))
             }
             Operation::DecideApproval => {
                 let DecideArgs { request_id, proposal_ref, proposal_version, decision } = parse(self, args)?;
@@ -338,6 +360,20 @@ struct SaveDraftArgs {
 struct SubmitArgs {
     id: String,
     version: i64,
+}
+
+/// One draft of a batch: the id and the version read last (the list carries it).
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct SubmitItemArg {
+    id: String,
+    version: i64,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SubmitBatchArgs {
+    items: Vec<SubmitItemArg>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -512,11 +548,36 @@ mod tests {
         let mutations: Vec<_> = Operation::ALL.into_iter().filter(|op| op.is_mutation()).map(|op| op.name()).collect();
         assert_eq!(
             mutations,
-            ["saveDraft", "submitRequest", "decideApproval", "answerQuestion", "createProject", "updateSettings", "registerConversation"]
+            ["saveDraft", "submitRequest", "submitRequests", "decideApproval", "answerQuestion", "createProject", "updateSettings", "registerConversation"]
         );
         for op in Operation::ALL {
             assert_eq!(op.document().starts_with("mutation"), op.is_mutation(), "{}", op.name());
         }
+    }
+
+    #[test]
+    fn the_check_and_the_batch_take_ids_with_versions_and_nothing_else() {
+        let check = prepare("checkSubmitRequest", json!({ "id": "r1", "version": 3 })).unwrap();
+        assert!(check.document.starts_with("query("));
+        assert_eq!(check.variables, json!({ "id": "r1", "version": 3 }));
+        assert!(prepare("checkSubmitRequest", json!({ "id": "r1" })).is_err());
+        assert!(prepare("checkSubmitRequest", json!({ "id": "r1", "version": 3, "url": "x" })).is_err());
+
+        let batch = prepare("submitRequests", json!({ "items": [{ "id": "a", "version": 1 }, { "id": "b", "version": 2 }] })).unwrap();
+        assert!(batch.document.starts_with("mutation("));
+        assert_eq!(batch.variables, json!({ "items": [{ "id": "a", "version": 1 }, { "id": "b", "version": 2 }] }));
+        // Nothing to submit, a field that is not an id and a version, or a stray argument.
+        assert!(prepare("submitRequests", json!({ "items": [] })).is_err());
+        assert!(prepare("submitRequests", json!({})).is_err());
+        assert!(prepare("submitRequests", json!({ "items": [{ "id": "a", "version": 1, "url": "x" }] })).is_err());
+        assert!(prepare("submitRequests", json!({ "items": [{ "id": "a", "version": "1" }] })).is_err());
+        assert!(prepare("submitRequests", json!({ "items": [{ "id": "a", "version": 1 }], "headers": {} })).is_err());
+    }
+
+    #[test]
+    fn the_list_carries_the_version() {
+        let p = prepare("requests", json!({})).unwrap();
+        assert!(p.document.contains("{ id version title"));
     }
 
     #[test]

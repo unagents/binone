@@ -5,15 +5,16 @@ import {
   DEFAULT_VIEW,
   EMPTY_FILTER,
   buildBoard,
-  cardRoute,
   filterChoices,
   isFiltering,
+  isLanePinned,
   normalizeHidden,
   parseView,
   type SwimlaneFilter,
   type SwimlaneGroupBy,
   type SwimlaneOrder,
 } from "~/utils/swimlane";
+import { requestRoute } from "~/utils/routes";
 import { canDrop, grabbedIds, toggleSelected } from "~/utils/swimlaneSubmit";
 
 const api = useApi();
@@ -87,12 +88,15 @@ function formatTime(ms: number) {
   return `${d.getMonth() + 1}/${d.getDate()} ${p(d.getHours())}:${p(d.getMinutes())}`;
 }
 
+function open(item: RequestSummary) {
+  void router.push(requestRoute(item));
+}
 function press(item: RequestSummary, event: MouseEvent) {
   if (event.shiftKey && item.lane === "draft") {
     selected.value = toggleSelected(selected.value, item.id);
     return;
   }
-  void router.push(cardRoute(item));
+  open(item);
 }
 
 function dragStart(item: RequestSummary, event: DragEvent) {
@@ -120,14 +124,17 @@ function startBatch(ids: string[]) {
   const byId = new Map(items.value.map((item) => [item.id, item]));
   const list = ids.flatMap((id) => {
     const item = byId.get(id);
-    return item ? [{ id, title: item.title }] : [];
+    return item ? [{ id, title: item.title, version: item.version }] : [];
   });
   if (list.length > 0) batch.value = list;
 }
-async function batchClosed(changed: boolean) {
+function batchClosed() {
   batch.value = null;
   selected.value = [];
-  if (changed) await reload();
+}
+// A call that may have changed something was answered and its result is on screen: read again.
+function batchSettled() {
+  void reload();
 }
 </script>
 
@@ -140,8 +147,8 @@ async function batchClosed(changed: boolean) {
         </UButton>
         <template #content>
           <div class="flex min-w-44 flex-col p-1" data-testid="lanes-menu">
-            <label v-for="(lane, index) in lanes" :key="lane.name" class="flex items-center gap-2 rounded-md px-3 py-2 text-sm hover:bg-elevated" :class="index === 0 ? 'opacity-50' : 'cursor-pointer'">
-              <input type="checkbox" :disabled="index === 0" :checked="index === 0 || !hidden.includes(lane.name)" :data-testid="`lane-toggle-${lane.name}`" @change="toggleLane(lane.name)" >
+            <label v-for="lane in lanes" :key="lane.name" class="flex items-center gap-2 rounded-md px-3 py-2 text-sm hover:bg-elevated" :class="isLanePinned(lanes, lane.name) ? 'opacity-50' : 'cursor-pointer'">
+              <input type="checkbox" :disabled="isLanePinned(lanes, lane.name)" :checked="isLanePinned(lanes, lane.name) || !hidden.includes(lane.name)" :data-testid="`lane-toggle-${lane.name}`" @change="toggleLane(lane.name)" >
               {{ lane.label || lane.name }}
             </label>
           </div>
@@ -188,7 +195,7 @@ async function batchClosed(changed: boolean) {
       <UButton size="xs" data-testid="selection-submit" @click="startBatch(selectedDrafts)">todo にする</UButton>
       <UButton size="xs" color="neutral" variant="ghost" @click="selected = []">選択を解除</UButton>
     </div>
-    <p v-else class="text-xs text-muted">draft のカードは Shift を押しながら押すと複数選べます。カードを todo のレーンへドラッグして todo にします。todo を隠している時は、選んだ draft の「todo にする」ボタンで todo 化します。</p>
+    <p v-else class="text-xs text-muted">draft のカードは Shift を押しながら押すと複数選べます。カードを todo のレーンへドラッグして todo にします。todo のレーンを隠している時は、draft を Shift で選ぶと上に出る選択のバーの「todo にする」ボタンで todo 化します。</p>
 
     <p v-if="loading && !data" class="text-sm text-muted" data-testid="loading">読み込んでいます…</p>
     <ApiErrorAlert v-if="error" :error="error" />
@@ -225,7 +232,7 @@ async function batchClosed(changed: boolean) {
               :data-card="item.id"
               tabindex="0"
               @click="press(item, $event)"
-              @keydown.enter="router.push(cardRoute(item))"
+              @keydown.enter="open(item)"
               @dragstart="dragStart(item, $event)"
               @dragend="dragEnd"
             >
@@ -241,9 +248,9 @@ async function batchClosed(changed: boolean) {
       </section>
     </div>
 
-    <UnsupportedNotice what="draft 以外の移動、レーンの追加" missing="レーンを動かすサーバーの操作（draft→todo の submitRequest だけある）。レーンの追加は設定の画面" />
+    <UnsupportedNotice what="draft 以外の移動、レーンの追加" missing="レーンを動かすサーバーの操作（draft→todo の submitRequests だけある）。レーンの追加は設定の画面" />
     <UnsupportedNotice what="エージェントによる点検と質疑" missing="draft の問題をエージェントが調べ、モーダルで質疑する仕組み（サーバー・エージェントの接続）。今はサーバーの検証だけ行います" />
 
-    <SwimlaneSubmitModal v-if="batch" :items="batch" @close="batchClosed" />
+    <SwimlaneSubmitModal v-if="batch" :items="batch" @close="batchClosed" @settled="batchSettled" />
   </ScreenFrame>
 </template>
