@@ -2,6 +2,7 @@
 //! the server. The webview only calls the commands below; it never sees the key.
 
 mod api;
+mod assist;
 mod server;
 mod storage;
 mod update;
@@ -172,6 +173,28 @@ fn open_release_page() -> Result<(), String> {
         .map_err(|e| format!("ブラウザを開けませんでした（{}）", e.kind()))
 }
 
+/// One answer of the request-writing assistant: the user's own `claude` CLI is run once with the
+/// request as it stands now (see `assist`). It never fails as a command; a problem is a `notice`.
+/// `session_id` is the one the previous answer gave (none for the first).
+#[tauri::command]
+async fn assist_send(app: AppHandle, message: String, draft: assist::Draft, session_id: Option<String>) -> assist::Outcome {
+    // The directory the CLI starts in: this app's own and empty, so no CLAUDE.md or project settings of the user's is met.
+    let cwd = app.path().app_data_dir().map(|dir| dir.join("assist-cwd"));
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        let home = std::env::var_os("HOME").map(PathBuf::from);
+        let env = |name: &str| std::env::var(name).ok();
+        let Some(claude) = assist::find_claude(&env, home.as_deref(), &|p| p.is_file(), &assist::login_shell_lookup) else {
+            return assist::not_found();
+        };
+        match cwd {
+            Ok(cwd) => assist::ask(&claude, &cwd, &draft, &message, session_id.as_deref(), assist::ANSWER_LIMIT),
+            Err(e) => assist::Outcome::Notice { kind: assist::NoticeKind::Failed, message: "会話用の作業場所を決められませんでした。".into(), detail: Some(e.to_string()) },
+        }
+    })
+    .await;
+    result.unwrap_or(assist::Outcome::Notice { kind: assist::NoticeKind::Failed, message: "会話を実行できませんでした。".into(), detail: None })
+}
+
 pub fn run() {
     tauri::Builder::default()
         .manage(api::Gateway::default())
@@ -184,7 +207,8 @@ pub fn run() {
             check_update,
             run_update,
             restart_app,
-            open_release_page
+            open_release_page,
+            assist_send
         ])
         .run(tauri::generate_context!())
         .expect("error while running the binone client");

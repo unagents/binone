@@ -15,6 +15,8 @@ import {
   type DraftBase,
   type DraftForm,
 } from "~/utils/requests";
+import { callNative } from "~/utils/api/transport";
+import { applyHeld, newChat, resetChat, sendMessage } from "~/utils/assist";
 import { requestRoute } from "~/utils/routes";
 import { validateProjectName } from "~/utils/settings";
 
@@ -43,6 +45,18 @@ const problems = ref<string[]>([]);
 const tagText = ref("");
 // The body is written as text; the preview shows it formatted (raw HTML, images and links are not shown as such).
 const previewing = ref(false);
+
+// The conversation with the assistant lives as long as this screen shows this request: leaving the
+// screen drops it, and so does moving to another request (see loadAll). Its session id is kept here.
+const chat = reactive(newChat());
+const chatEnabled = computed(() => editable.value && !loading.value && !loadError.value);
+function onChatSend(text: string) {
+  void sendMessage(chat, form, text, (message, draft, sessionId) => callNative("assist_send", { message, draft, sessionId }));
+}
+
+function onChatApplyHeld(lineId: number) {
+  applyHeld(chat, form, lineId);
+}
 
 const dirty = computed(() => !sameForm(form, savedForm.value));
 const editable = computed(() => lane.value === "draft");
@@ -105,6 +119,8 @@ async function loadRequest(id: string) {
 
 async function loadAll(id: string | null) {
   loading.value = true;
+  // A new conversation for the request now shown.
+  resetChat(chat);
   // Another request (or none): what the form held is dropped, not carried over.
   Object.assign(form, emptyForm());
   savedForm.value = emptyForm();
@@ -338,6 +354,6 @@ async function createProject() {
         </template>
       </ScreenFrame>
     </div>
-    <RequestsAgentPane title="依頼作成支援エージェント" />
+    <RequestsAgentPane title="依頼作成支援エージェント" :chat="chat" :enabled="chatEnabled" @send="onChatSend" @apply-held="onChatApplyHeld" />
   </div>
 </template>
