@@ -281,7 +281,7 @@ fi
 # in the process list or in this script's output.
 # Tracing (bash -x) is switched off while the token is held, so a trace does not show it either.
 api() {
-  local traced=0 status=0 token=""
+  local traced=0 status=0 missing=0 token=""
   [[ $- != *x* ]] || traced=1
   { set +x; } 2>/dev/null
   token="$(printf 'protocol=%s\nhost=%s\n\n' "$DIST_PROTO" "$DIST_HOST" |
@@ -291,10 +291,10 @@ api() {
     curl -q -sS -K <(auth_config "$token") "$@" || status=$?
     token=""
   else
-    status=90
+    missing=1
   fi
   [[ "$traced" == 0 ]] || set -x
-  [[ "$status" != 90 ]] || die "git credential fill returned no credential for $DIST_PROTO://$DIST_HOST"
+  [[ "$missing" == 0 ]] || die "git credential fill returned no credential for $DIST_PROTO://$DIST_HOST"
   return "$status"
 }
 # The curl config line that carries the token. Inside the double quotes of a curl config a
