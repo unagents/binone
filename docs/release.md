@@ -45,12 +45,12 @@ runs `brew update` and `brew upgrade --cask binone` as program-and-arguments, no
 shell. The whole update, the judgment above included, has 10 minutes in all. When it runs out of
 time everything it started is stopped with it, child processes too (the whole process group: TERM
 first, then KILL after a short grace), and reaped; the screen says the update ran out of time and
-shows the end of the output so far, and "更新" can be pressed again. A failure shows the exit code and the end of the output; a button
-starts the app again after a success (it never restarts by itself). Without Homebrew, or for an
-app that the cask did not install (a development build), "更新" is not shown and nothing is run:
-the screen offers, as soon as the newer version is known, the release page in the default
-browser and the command `brew upgrade --cask binone`. The update does not touch the app's data
-directory, so the saved address and key stay.
+shows the end of the output so far, and "更新" can be pressed again. A failure shows the exit code
+and the end of the output; a button starts the app again after a success (it never restarts by
+itself). Without Homebrew, or for an app that the cask did not install (a development build), "更新"
+is not shown and nothing is run: the screen offers, as soon as the newer version is known, the
+release page in the default browser and the command `brew upgrade --cask binone`. The update does
+not touch the app's data directory, so the saved address and key stay.
 
 With `NUXT_PUBLIC_SAMPLE_DATA=1` the states can be drawn with `?sample-update=latest`,
 `?sample-update=available` (update by Homebrew), `?sample-update=manual` (newer, by hand) and
