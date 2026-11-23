@@ -42,8 +42,9 @@ Homebrew at `/opt/homebrew/bin/brew`, then `/usr/local/bin/brew` (not through `P
 that this app is an app bundle installed by the cask (`brew list --cask binone` succeeds; this is
 the only Homebrew call of a check, and it has a 10 second limit). With both, "更新" is shown; it
 runs `brew update` and `brew upgrade --cask binone` as program-and-arguments, not through a
-shell, within 10 minutes for the two together. A step that goes past the limit is killed and
-reaped; the screen says the update ran out of time and shows the end of the output so far, and
+shell, within 10 minutes for the two together (the `brew list` judgment is counted in them). On
+time-out brew is stopped together with its whole process group (TERM, then KILL after a short
+grace), so no grandchild process is left, and reaped; the screen says the update ran out of time and shows the end of the output so far, and
 "更新" can be pressed again. A failure shows the exit code and the end of the output; a button
 starts the app again after a success (it never restarts by itself). Without Homebrew, or for an
 app that the cask did not install (a development build), "更新" is not shown and nothing is run:

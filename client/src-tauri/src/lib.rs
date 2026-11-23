@@ -119,10 +119,13 @@ async fn api_call(
     gateway.call(&settings, &op, args).await
 }
 
+fn is_bundled() -> bool {
+    std::env::current_exe().is_ok_and(|exe| update::is_app_bundle(&exe))
+}
+
 /// How an update would be done from here: Homebrew, or by hand. Runs `brew list` at most once.
 fn detect_plan() -> update::Plan {
-    let bundled = std::env::current_exe().is_ok_and(|exe| update::is_app_bundle(&exe));
-    update::plan(bundled, &|path| path.is_file(), &update::SystemRunner)
+    update::plan(is_bundled(), &|path| path.is_file(), &update::SystemRunner, update::LIST_TIME_LIMIT)
 }
 
 /// The version check: the running version against the latest published release, and (only when
@@ -142,7 +145,7 @@ async fn check_update(app: AppHandle) -> update::UpdateCheck {
 /// this app was not installed by the cask). One at a time, and within a time limit.
 #[tauri::command]
 async fn run_update(gate: State<'_, update::UpdateGate>) -> Result<update::UpdateOutcome, String> {
-    update::run_exclusive(&gate, || update::run_update(&detect_plan(), &update::SystemRunner, update::UPDATE_TIME_LIMIT)).await
+    update::run_exclusive(&gate, || update::detect_and_update(is_bundled(), &|path| path.is_file(), &update::SystemRunner, update::UPDATE_TIME_LIMIT)).await
 }
 
 /// Starts the app again (after an update the new version starts).

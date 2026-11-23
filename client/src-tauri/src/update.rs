@@ -34,6 +34,10 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 pub const UPDATE_TIME_LIMIT: Duration = Duration::from_secs(10 * 60);
 /// The one brew call made to find out how to update (`brew list --cask binone`).
 pub const LIST_TIME_LIMIT: Duration = Duration::from_secs(10);
+/// After a time-out: how long the program gets to end on TERM before the whole group is killed.
+const TERM_GRACE: Duration = Duration::from_millis(500);
+/// After a stop: how long the readers of the output are waited for (a straggler holding a pipe must not hold us).
+const DRAIN_LIMIT: Duration = Duration::from_secs(1);
 const OUTPUT_TAIL_LINES: usize = 20;
 const OUTPUT_TAIL_CHARS: usize = 2000;
 
@@ -229,17 +233,59 @@ fn text_of(buffer: &Mutex<Vec<u8>>) -> String {
     String::from_utf8_lossy(&buffer.lock().unwrap_or_else(|e| e.into_inner())).into_owned()
 }
 
+/// Waits for the readers to reach the end of their pipes, but not longer than `limit` in all
+/// (a program's child may hold a pipe open for good; its reader is then left behind).
+fn drain(readers: Vec<std::thread::JoinHandle<()>>, limit: Duration) {
+    let deadline = Instant::now() + limit;
+    for reader in readers {
+        while !reader.is_finished() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        if reader.is_finished() {
+            let _ = reader.join();
+        }
+    }
+}
+
+#[cfg(unix)]
+mod group {
+    extern "C" {
+        fn kill(pid: i32, sig: i32) -> i32;
+    }
+    pub const SIGTERM: i32 = 15;
+    pub const SIGKILL: i32 = 9;
+
+    /// Signals every process of the group led by `leader` (the program was started as the leader of its own group).
+    pub fn signal(leader: u32, sig: i32) {
+        if let Ok(pid) = i32::try_from(leader) {
+            // SAFETY: kill(2) only sends a signal; a negative pid names the process group.
+            unsafe { kill(-pid, sig) };
+        }
+    }
+}
+
+/// Stops the program and its children (git, curl, installers...) and reaps it: TERM to the group,
+/// a short grace, then KILL to the group. The leader is not reaped until then, so the group id is not reused.
+fn stop_group(child: &mut std::process::Child) {
+    #[cfg(unix)]
+    {
+        group::signal(child.id(), group::SIGTERM);
+        std::thread::sleep(TERM_GRACE);
+        group::signal(child.id(), group::SIGKILL);
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
 impl Runner for SystemRunner {
     fn run(&self, program: &Path, args: &[&str], limit: Duration) -> Result<RunOutput, String> {
         use std::process::Stdio;
         let started = |e: std::io::Error| format!("could not start {}: {}", program.display(), e.kind());
-        let mut child = std::process::Command::new(program)
-            .args(args)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(started)?;
+        let mut command = std::process::Command::new(program);
+        command.args(args).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+        #[cfg(unix)]
+        std::os::unix::process::CommandExt::process_group(&mut command, 0);
+        let mut child = command.spawn().map_err(started)?;
         let (stdout, out_reader) = collect(child.stdout.take().ok_or("no standard output")?);
         let (stderr, err_reader) = collect(child.stderr.take().ok_or("no standard error")?);
         let deadline = Instant::now() + limit;
@@ -247,25 +293,19 @@ impl Runner for SystemRunner {
             match child.try_wait() {
                 Ok(Some(status)) => break (status.code(), false),
                 Ok(None) if Instant::now() >= deadline => {
-                    // Kill, then wait: the child must not be left as a zombie.
-                    let _ = child.kill();
-                    let _ = child.wait();
+                    stop_group(&mut child);
                     break (None, true);
                 }
                 Ok(None) => std::thread::sleep(Duration::from_millis(20)),
                 Err(e) => {
-                    let _ = child.kill();
-                    let _ = child.wait();
+                    stop_group(&mut child);
                     return Err(format!("could not wait for {}: {}", program.display(), e.kind()));
                 }
             }
         };
-        if !timed_out {
-            // The program has ended, so the pipes reach their end (unless it left a child
-            // holding them; after a kill the readers are not waited for, for that reason).
-            let _ = out_reader.join();
-            let _ = err_reader.join();
-        }
+        // The pipes reach their end once the program (and its children) are gone; wait for the
+        // tail of the output, but only a short while.
+        drain(vec![out_reader, err_reader], DRAIN_LIMIT);
         let mut text = text_of(&stdout);
         text.push_str(&text_of(&stderr));
         Ok(RunOutput { code, text, timed_out })
@@ -306,12 +346,13 @@ pub enum Plan {
 
 /// Whether the update can be run with Homebrew: there is a brew, this app is an app bundle, and
 /// the cask `binone` is installed.
-pub fn plan(bundled: bool, exists: &dyn Fn(&Path) -> bool, runner: &dyn Runner) -> Plan {
+/// `list_limit` caps the one Homebrew call made (`brew list`).
+pub fn plan(bundled: bool, exists: &dyn Fn(&Path) -> bool, runner: &dyn Runner, list_limit: Duration) -> Plan {
     let Some(brew) = find_brew(exists) else {
         return Plan::Manual(ManualReason::NoBrew);
     };
     let installed = bundled
-        && matches!(runner.run(&brew, &["list", "--cask", CASK], LIST_TIME_LIMIT), Ok(RunOutput { code: Some(0), timed_out: false, .. }));
+        && matches!(runner.run(&brew, &["list", "--cask", CASK], list_limit), Ok(RunOutput { code: Some(0), timed_out: false, .. }));
     if installed {
         Plan::Brew(brew)
     } else {
@@ -371,6 +412,14 @@ pub fn run_update(plan: &Plan, runner: &dyn Runner, limit: Duration) -> UpdateOu
         };
     }
     last
+}
+
+/// What "更新" runs: the judgment of the way (`brew list`, at most `LIST_TIME_LIMIT`) and then the
+/// update, all within the one `limit`: the judgment is part of it, not extra.
+pub fn detect_and_update(bundled: bool, exists: &dyn Fn(&Path) -> bool, runner: &dyn Runner, limit: Duration) -> UpdateOutcome {
+    let deadline = Instant::now() + limit;
+    let plan = plan(bundled, exists, runner, LIST_TIME_LIMIT.min(limit));
+    run_update(&plan, runner, deadline.saturating_duration_since(Instant::now()))
 }
 
 /// Lets one update run at a time.
@@ -594,7 +643,7 @@ mod tests {
     #[test]
     fn with_brew_and_the_cask_the_plan_is_brew() {
         let fake = Fake::new(vec![out(0, "binone")]);
-        assert_eq!(plan(true, &|_| true, &fake), Plan::Brew(PathBuf::from(BREW)));
+        assert_eq!(plan(true, &|_| true, &fake, LIST_TIME_LIMIT), Plan::Brew(PathBuf::from(BREW)));
         assert_eq!(*fake.calls.borrow(), [format!("{BREW} list --cask binone")]);
         assert_eq!(*fake.limits.borrow(), [Duration::from_secs(10)]);
         assert_eq!(Plan::Brew(PathBuf::from(BREW)).method(), UpdateMethod::Brew);
@@ -603,7 +652,7 @@ mod tests {
     #[test]
     fn a_list_that_runs_out_of_time_is_not_the_cask() {
         let fake = Fake::new(vec![stopped("")]);
-        assert_eq!(plan(true, &|_| true, &fake), Plan::Manual(ManualReason::NotInstalledByCask));
+        assert_eq!(plan(true, &|_| true, &fake, LIST_TIME_LIMIT), Plan::Manual(ManualReason::NotInstalledByCask));
         assert_eq!(
             Plan::Manual(ManualReason::NoBrew).method(),
             UpdateMethod::Manual { reason: ManualReason::NoBrew }
@@ -613,19 +662,19 @@ mod tests {
     #[test]
     fn without_brew_nothing_is_run() {
         let fake = Fake::new(vec![]);
-        assert_eq!(plan(true, &|_| false, &fake), Plan::Manual(ManualReason::NoBrew));
+        assert_eq!(plan(true, &|_| false, &fake, LIST_TIME_LIMIT), Plan::Manual(ManualReason::NoBrew));
         assert!(fake.calls.borrow().is_empty());
     }
 
     #[test]
     fn without_the_cask_or_outside_a_bundle_the_plan_is_manual() {
         let not_installed = Fake::new(vec![out(1, "Error: Cask 'binone' is not installed.")]);
-        assert_eq!(plan(true, &|_| true, &not_installed), Plan::Manual(ManualReason::NotInstalledByCask));
+        assert_eq!(plan(true, &|_| true, &not_installed, LIST_TIME_LIMIT), Plan::Manual(ManualReason::NotInstalledByCask));
         let cannot_start = Fake::new(vec![Err("could not start".into())]);
-        assert_eq!(plan(true, &|_| true, &cannot_start), Plan::Manual(ManualReason::NotInstalledByCask));
+        assert_eq!(plan(true, &|_| true, &cannot_start, LIST_TIME_LIMIT), Plan::Manual(ManualReason::NotInstalledByCask));
         // A development build is not the cask's app, even when the cask is installed.
         let dev = Fake::new(vec![]);
-        assert_eq!(plan(false, &|_| true, &dev), Plan::Manual(ManualReason::NotInstalledByCask));
+        assert_eq!(plan(false, &|_| true, &dev, LIST_TIME_LIMIT), Plan::Manual(ManualReason::NotInstalledByCask));
         assert!(dev.calls.borrow().is_empty());
     }
 
@@ -699,6 +748,35 @@ mod tests {
         let fake = Fake::new(vec![out(0, ""), out(0, "")]);
         run_update(&brew(), &fake, Duration::ZERO);
         assert_eq!(*fake.limits.borrow(), [Duration::ZERO, Duration::ZERO]);
+    }
+
+    #[test]
+    fn the_judgment_shares_the_one_limit_with_the_update() {
+        let fake = Fake::new(vec![out(0, "binone"), out(0, ""), out(0, "")]);
+        let outcome = detect_and_update(true, &|_| true, &fake, LIMIT);
+        assert!(matches!(outcome, UpdateOutcome::Finished { ok: true, .. }), "{outcome:?}");
+        let limits = fake.limits.borrow();
+        assert_eq!(limits[0], LIST_TIME_LIMIT);
+        assert!(limits[1] <= LIMIT && limits[2] <= limits[1], "{limits:?}");
+        // A limit shorter than the list limit caps the list call too.
+        let short = Fake::new(vec![stopped("")]);
+        detect_and_update(true, &|_| true, &short, Duration::from_secs(3));
+        assert_eq!(short.limits.borrow()[0], Duration::from_secs(3));
+    }
+
+    #[test]
+    fn a_judgment_that_used_the_time_leaves_less_for_the_steps() {
+        struct Slow(Fake);
+        impl Runner for Slow {
+            fn run(&self, program: &Path, args: &[&str], limit: Duration) -> Result<RunOutput, String> {
+                std::thread::sleep(Duration::from_millis(200));
+                self.0.run(program, args, limit)
+            }
+        }
+        let slow = Slow(Fake::new(vec![out(0, "binone"), out(0, ""), out(0, "")]));
+        detect_and_update(true, &|_| true, &slow, Duration::from_secs(60));
+        let limits = slow.0.limits.borrow();
+        assert!(limits[1] < Duration::from_secs(60) - Duration::from_millis(150), "{limits:?}");
     }
 
     #[test]
@@ -778,6 +856,58 @@ mod tests {
             assert_eq!(output.code, None);
             assert!(output.text.contains("before"), "{:?}", output.text);
             assert!(took < Duration::from_secs(20), "{took:?}");
+        }
+
+        /// Whether a process still runs (a zombie waiting to be reaped by someone else does not count).
+        fn alive(pid: u32) -> bool {
+            let shown = std::process::Command::new("ps").args(["-o", "stat=", "-p", &pid.to_string()]).output().unwrap();
+            let stat = String::from_utf8_lossy(&shown.stdout).trim().to_owned();
+            !stat.is_empty() && !stat.starts_with('Z')
+        }
+
+        #[test]
+        fn a_program_past_its_limit_takes_its_children_with_it() {
+            // The program and its child both ignore TERM, so only the KILL to the group ends them.
+            let (answer, took) = sh("trap '' TERM; sleep 300 & echo child=$!; wait", Duration::from_millis(300));
+            let output = answer.unwrap();
+            let pid: u32 = output.text.split("child=").nth(1).and_then(|r| r.split_whitespace().next()).and_then(|n| n.parse().ok()).unwrap_or_else(|| panic!("{:?}", output.text));
+            let mut gone = false;
+            for _ in 0..100 {
+                if !alive(pid) {
+                    gone = true;
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            if !gone {
+                let _ = std::process::Command::new("kill").args(["-9", &pid.to_string()]).status();
+            }
+            assert!(output.timed_out);
+            assert!(gone, "the child {pid} outlived the time-out");
+            assert!(took < Duration::from_secs(20), "{took:?}");
+        }
+
+        #[test]
+        fn the_wait_for_the_output_does_not_pass_its_limit_while_a_pipe_is_held() {
+            use std::process::Stdio;
+            // `sleep` holds its (never written) standard output open, like a child that keeps the pipe.
+            let mut holder = std::process::Command::new("sleep").arg("300").stdout(Stdio::piped()).spawn().unwrap();
+            let (buffer, reader) = collect(holder.stdout.take().unwrap());
+            let started = Instant::now();
+            drain(vec![reader], Duration::from_millis(300));
+            let took = started.elapsed();
+            let _ = holder.kill();
+            let _ = holder.wait();
+            assert!(took >= Duration::from_millis(250) && took < Duration::from_secs(5), "{took:?}");
+            assert_eq!(text_of(&buffer), "");
+        }
+
+        #[test]
+        fn what_was_written_just_before_the_stop_is_kept_to_its_end() {
+            let (answer, _) = sh("trap '' TERM; i=0; while [ $i -lt 20 ]; do echo line$i; i=$((i+1)); done; echo last-line; exec sleep 300", Duration::from_millis(500));
+            let output = answer.unwrap();
+            assert!(output.timed_out);
+            assert!(output.text.trim_end().ends_with("last-line"), "{:?}", output.text);
         }
 
         #[test]
