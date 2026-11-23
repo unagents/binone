@@ -1,5 +1,276 @@
+<script setup lang="ts">
+import { toApiError, type ApiError } from "~/utils/api/errors";
+import type { Request } from "~/types/binone";
+import {
+  addTag,
+  emptyForm,
+  formFromRequest,
+  formatDateTime,
+  sameForm,
+  submitProblems,
+  toDraftInput,
+  type DraftBase,
+  type DraftForm,
+} from "~/utils/requests";
+import { validateProjectName } from "~/utils/settings";
+
+// One screen for a new request and for a draft being edited (`/requests/new?id=<id>`). The version
+// read is kept and sent back on every save; a request that moved on is a conflict the user settles.
+const route = useRoute();
+const router = useRouter();
+const api = useApi();
+
+const form = reactive<DraftForm>(emptyForm());
+const base = ref<DraftBase | null>(null);
+const lane = ref("draft");
+const savedForm = ref<DraftForm>(emptyForm());
+const savedAt = ref<number | null>(null);
+const loadedId = computed(() => (typeof route.query.id === "string" && route.query.id !== "" ? route.query.id : null));
+
+const projects = ref<string[]>([]);
+const kinds = ref<string[]>([]);
+const loading = ref(true);
+const loadError = ref<ApiError | null>(null);
+const optionsError = ref<ApiError | null>(null);
+const actionError = ref<ApiError | null>(null);
+const conflict = ref(false);
+const busy = ref<"save" | "submit" | "reload" | "overwrite" | null>(null);
+const problems = ref<string[]>([]);
+const tagText = ref("");
+
+const dirty = computed(() => !sameForm(form, savedForm.value));
+const editable = computed(() => lane.value === "draft");
+const stateText = computed(() => {
+  if (savedAt.value === null) return base.value ? "保存済み" : "未保存";
+  return `${dirty.value ? "変更あり ・ " : ""}保存済み ${formatDateTime(savedAt.value)}`;
+});
+
+function apply(request: Request) {
+  Object.assign(form, formFromRequest(request));
+  savedForm.value = formFromRequest(request);
+  base.value = { id: request.id, version: request.version, change: request.change };
+  lane.value = request.lane;
+}
+
+async function loadOptions() {
+  optionsError.value = null;
+  try {
+    projects.value = await api.projects();
+  } catch (e) {
+    optionsError.value = toApiError(e);
+  }
+  try {
+    kinds.value = (await api.settings()).settings.kinds;
+  } catch (e) {
+    optionsError.value ??= toApiError(e);
+  }
+}
+
+async function loadRequest(id: string) {
+  loadError.value = null;
+  try {
+    apply(await api.request(id));
+  } catch (e) {
+    loadError.value = toApiError(e);
+  }
+}
+
+onMounted(async () => {
+  await Promise.all([loadOptions(), loadedId.value ? loadRequest(loadedId.value) : Promise.resolve()]);
+  loading.value = false;
+});
+
+const projectItems = computed(() => withCurrent(projects.value, form.project));
+const kindItems = computed(() => withCurrent(kinds.value, form.kind));
+function withCurrent(list: string[], current: string) {
+  return (current !== "" && !list.includes(current) ? [...list, current] : list).map((v) => ({ label: v, value: v }));
+}
+
+function fail(e: unknown) {
+  const error = toApiError(e);
+  conflict.value = error.kind === "conflict";
+  actionError.value = conflict.value ? null : error;
+}
+
+/** Saves the draft; returns the saved request, or null when it failed (the reason is on screen). */
+async function save(versionOverride?: number): Promise<Request | null> {
+  actionError.value = null;
+  conflict.value = false;
+  try {
+    const saved = await api.saveDraft(toDraftInput(form, base.value, versionOverride));
+    apply(saved);
+    savedAt.value = Date.now();
+    if (loadedId.value !== saved.id) await router.replace({ path: "/requests/new", query: { id: saved.id } });
+    return saved;
+  } catch (e) {
+    fail(e);
+    return null;
+  }
+}
+
+async function onSave() {
+  if (busy.value) return;
+  busy.value = "save";
+  await save();
+  busy.value = null;
+}
+
+async function onSubmit() {
+  if (busy.value) return;
+  problems.value = submitProblems(form);
+  if (problems.value.length) return;
+  busy.value = "submit";
+  const saved = !base.value || dirty.value ? await save() : { id: base.value.id, version: base.value.version };
+  if (saved) {
+    try {
+      await api.submitRequest(saved.id, saved.version);
+      await navigateTo(`/requests/${saved.id}`);
+    } catch (e) {
+      fail(e);
+    }
+  }
+  busy.value = null;
+}
+
+/** Take the server's version in place of the edits. */
+async function onReread() {
+  if (!base.value || busy.value) return;
+  busy.value = "reload";
+  actionError.value = null;
+  conflict.value = false;
+  try {
+    apply(await api.request(base.value.id));
+  } catch (e) {
+    fail(e);
+  }
+  busy.value = null;
+}
+
+/** Save the edits over what the server has now: the newest version is read first, then sent. */
+async function onOverwrite() {
+  if (!base.value || busy.value) return;
+  busy.value = "overwrite";
+  try {
+    const latest = await api.request(base.value.id);
+    base.value = { id: latest.id, version: latest.version, change: latest.change };
+    if (latest.lane !== "draft") {
+      lane.value = latest.lane;
+      conflict.value = false;
+      actionError.value = { kind: "conflict", detail: "依頼はもう draft ではありません（上書きできません）" };
+    } else {
+      await save();
+    }
+  } catch (e) {
+    fail(e);
+  }
+  busy.value = null;
+}
+
+function onTagKeydown(event: KeyboardEvent) {
+  if (event.key !== "Enter" || event.isComposing || event.keyCode === 229) return;
+  event.preventDefault();
+  form.tags = addTag(form.tags, tagText.value);
+  tagText.value = "";
+}
+
+// A project made from the choices.
+const newProject = ref("");
+const projectOpen = ref(false);
+const projectError = ref<string>();
+const projectActionError = ref<ApiError | null>(null);
+const creating = ref(false);
+async function createProject() {
+  if (creating.value) return;
+  projectError.value = validateProjectName(newProject.value, projects.value) ?? undefined;
+  if (projectError.value) return;
+  creating.value = true;
+  projectActionError.value = null;
+  try {
+    const name = await api.createProject(newProject.value.trim());
+    projects.value = await api.projects();
+    form.project = name;
+    newProject.value = "";
+    projectOpen.value = false;
+  } catch (e) {
+    projectActionError.value = toApiError(e);
+  } finally {
+    creating.value = false;
+  }
+}
+</script>
+
 <template>
-  <ScreenFrame title="依頼の登録">
-    <EmptyFrame name="request-new" />
-  </ScreenFrame>
+  <div class="flex h-full min-h-0">
+    <div class="min-w-0 flex-1 overflow-y-auto">
+      <ScreenFrame :title="base ? '依頼の編集' : '依頼の登録'" description="作業指示を Markdown で書きます。「途中保存」と「todo 化」は別の操作です。" wide>
+        <template #actions>
+          <span class="text-xs text-muted" data-testid="save-state">{{ stateText }}</span>
+          <UButton color="neutral" variant="outline" size="sm" :disabled="!editable || !!loadError" :loading="busy === 'save'" data-testid="save" @click="onSave">途中保存</UButton>
+          <UButton size="sm" :disabled="!editable || !!loadError" :loading="busy === 'submit'" data-testid="submit" @click="onSubmit">todo 化</UButton>
+        </template>
+
+        <p v-if="loading" class="text-sm text-muted" data-testid="loading">読み込んでいます…</p>
+        <ApiErrorAlert v-if="loadError" :error="loadError" />
+        <ApiErrorAlert v-if="optionsError" :error="optionsError" />
+
+        <template v-if="!loading && !loadError">
+          <UAlert v-if="!editable" color="warning" variant="subtle" title="この依頼は draft ではないので編集できません" data-testid="not-draft">
+            <template #description>
+              <NuxtLink :to="`/requests/${base?.id}`" class="underline">依頼の状況を開く</NuxtLink>
+            </template>
+          </UAlert>
+
+          <UAlert v-if="conflict" color="warning" variant="subtle" title="他の操作と重なりました" data-testid="conflict">
+            <template #description>
+              <p>読み込んだ後に、この依頼が別の所で更新されました。サーバーの内容を読み直すと、ここでの変更は失われます。上書きすると、ここでの内容がサーバーの内容に替わります。</p>
+              <div class="mt-2 flex gap-2">
+                <UButton size="xs" color="neutral" variant="outline" :loading="busy === 'reload'" data-testid="conflict-reload" @click="onReread">読み直す</UButton>
+                <UButton size="xs" color="warning" :loading="busy === 'overwrite'" data-testid="conflict-overwrite" @click="onOverwrite">上書き</UButton>
+              </div>
+            </template>
+          </UAlert>
+          <ApiErrorAlert v-if="actionError" :error="actionError" />
+          <UAlert v-if="problems.length" color="warning" variant="subtle" title="todo 化の前に確かめてください" data-testid="problems">
+            <template #description>
+              <ul class="list-disc pl-5"><li v-for="p in problems" :key="p">{{ p }}</li></ul>
+            </template>
+          </UAlert>
+
+          <fieldset :disabled="!editable" class="flex min-w-0 flex-col gap-4">
+            <UInput v-model="form.title" size="xl" class="w-full" placeholder="タイトル" aria-label="タイトル" data-testid="title" />
+
+            <div class="grid grid-cols-[repeat(auto-fill,minmax(200px,1fr))] gap-x-4 gap-y-3 border-b border-default pb-4">
+              <UFormField label="プロジェクト" :error="projectError">
+                <USelect v-model="form.project" :items="projectItems" placeholder="選んでください" class="w-full" data-testid="project" />
+                <UButton type="button" variant="link" size="xs" class="px-0" data-testid="project-new-toggle" @click="projectOpen = !projectOpen">新しいプロジェクトを作る</UButton>
+                <form v-if="projectOpen" class="mt-1 flex gap-1" data-testid="project-new" @submit.prevent="createProject">
+                  <UInput v-model="newProject" size="sm" class="min-w-0 flex-1" placeholder="プロジェクトの名前" autocomplete="off" data-testid="project-new-name" />
+                  <UButton type="submit" size="sm" :loading="creating">作る</UButton>
+                </form>
+                <ApiErrorAlert v-if="projectActionError" class="mt-1" :error="projectActionError" />
+              </UFormField>
+              <UFormField label="種別">
+                <USelect v-model="form.kind" :items="kindItems" placeholder="選んでください" class="w-full" data-testid="kind" />
+              </UFormField>
+              <UFormField label="protocol" help="選択肢をサーバーが返さないため、名前を直接入れます">
+                <UInput v-model="form.protocol" class="w-full" placeholder="例: protocol-a" autocomplete="off" data-testid="protocol" />
+              </UFormField>
+              <UFormField label="タグ">
+                <div class="flex min-h-8 flex-wrap items-center gap-1 rounded-md border border-default px-2 py-1">
+                  <UBadge v-for="t in form.tags" :key="t" variant="subtle" size="sm" class="gap-1" data-testid="tag">
+                    {{ t }}
+                    <button type="button" :aria-label="`${t} を外す`" class="opacity-70 hover:opacity-100" @click="form.tags = form.tags.filter((x) => x !== t)">×</button>
+                  </UBadge>
+                  <input v-model="tagText" class="min-w-16 flex-1 bg-transparent text-sm outline-none" placeholder="追加…" aria-label="タグを追加" data-testid="tag-input" @keydown="onTagKeydown">
+                </div>
+              </UFormField>
+            </div>
+
+            <UTextarea v-model="form.body" :rows="14" autoresize class="w-full" placeholder="作業指示を Markdown で書く" aria-label="作業指示（Markdown）" data-testid="body" />
+          </fieldset>
+        </template>
+      </ScreenFrame>
+    </div>
+    <RequestsAgentPane title="依頼作成支援エージェント" />
+  </div>
 </template>

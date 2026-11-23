@@ -61,5 +61,6 @@ const showPage = computed(() => connected.value !== null || route.path === "/con
       <slot v-if="showPage" />
       <ConnectionScreen v-else />
     </div>
+    <NotificationBand v-if="connected" />
   </div>
 </template>
