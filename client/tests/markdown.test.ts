@@ -10,7 +10,7 @@ function expectSafe(html: string) {
   for (const tag of tagsOf(html)) {
     expect(ALLOWED_TAGS as readonly string[], `<${tag.name}> in ${html}`).toContain(tag.name);
     // The only attribute that may appear is a class made by the renderer itself.
-    expect(tag.attrs.replace(/^class="md-(link|image)"$/, "").replace(/\/$/, "").trim(), `attrs of <${tag.name}> in ${html}`).toBe("");
+    expect(tag.attrs.replace(/^class="md-(link|image|left|center|right)"$/, "").replace(/\/$/, "").trim(), `attrs of <${tag.name}> in ${html}`).toBe("");
   }
 }
 
@@ -23,6 +23,16 @@ describe("renderMarkdown", () => {
     expect(html).toContain("<code>code</code>");
     expect(html).toContain("<pre>");
     expect(html).toContain("<table>");
+    expectSafe(html);
+  });
+
+  it("turns a column alignment into a class, never a style attribute", () => {
+    const html = renderMarkdown("| a | b | c | d |\n|:--|:-:|--:|---|\n| 1 | 2 | 3 | 4 |");
+    expect(html).not.toMatch(/style=/i);
+    expect(html).toContain('<th class="md-left">a</th>');
+    expect(html).toContain('<td class="md-center">2</td>');
+    expect(html).toContain('<td class="md-right">3</td>');
+    expect(html).toContain("<td>4</td>");
     expectSafe(html);
   });
 

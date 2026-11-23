@@ -8,8 +8,10 @@ import { describeApiError } from "~/utils/api/errors";
 import type { SubmitBatch } from "~/types/binone";
 import { requestRoute } from "~/utils/routes";
 import {
+  describeEffect,
   describeMissing,
   describeSubmitCode,
+  titleOf,
   runSubmitFlow,
   type BatchItem,
   type StopChoice,
@@ -101,12 +103,19 @@ onMounted(async () => {
 });
 
 const refusal = computed(() => (stopped.value?.kind === "refused" ? stopped.value.check : null));
+const failure = computed(() => (stopped.value?.kind === "batch" ? stopped.value.failure : null));
 const errorText = computed(() => {
   const o = outcome.value;
   if (stopped.value?.kind === "error") return stopped.value.error;
   return o && (o.status === "failed" || o.status === "unknown") ? o.error : null;
 });
 const count = computed(() => (outcome.value?.status === "submitted" ? outcome.value.batch.requests.length || props.items.length : 0));
+/** The draft to open in the editor: the one that stopped the check, or the first cause of a failed batch. */
+const editTarget = computed(() => {
+  const s = stopped.value;
+  if (!s) return null;
+  return s.kind === "batch" ? (s.failure.causes[0]?.item ?? null) : s.item;
+});
 const canClose = computed(() => phase.value !== "submitting");
 
 function openEditor(item: BatchItem) {
@@ -149,10 +158,23 @@ function openEditor(item: BatchItem) {
             <p class="text-sm text-default">{{ describeApiError(stopped.error.kind).title }}</p>
             <p class="text-xs break-words text-muted" data-testid="submit-reason">{{ stopped.error.detail }}</p>
           </template>
-          <p class="text-xs text-muted">この間も、何も変わっていません（全て draft のままです）。直してから「もう一度確かめる」を押すと、最新の内容で最初から確かめます。</p>
+          <template v-else-if="failure">
+            <p class="text-sm font-medium text-highlighted">todo にできませんでした</p>
+            <div v-for="cause in failure.causes" :key="cause.item.id" class="flex flex-col gap-1" data-testid="submit-cause">
+              <p class="text-sm text-highlighted">原因: 「{{ titleOf(cause.item) }}」</p>
+              <p class="text-sm text-default"><code class="rounded bg-elevated px-1 text-xs">{{ cause.check.code }}</code> {{ describeSubmitCode(cause.check.code) }}</p>
+              <p v-if="cause.check.missing.length" class="text-sm text-default">足りない項目: {{ describeMissing(cause.check.missing).join("、") }}</p>
+              <p v-if="cause.check.message" class="text-xs break-words text-muted">{{ cause.check.message }}</p>
+            </div>
+            <ul v-if="failure.effects.length" class="flex flex-col gap-1 text-sm text-default" data-testid="submit-effects">
+              <li v-for="effect in failure.effects" :key="effect.item.id" :data-testid="`submit-effect-${effect.effect}`">「{{ titleOf(effect.item) }}」: {{ describeEffect(effect.effect) }}</li>
+            </ul>
+          </template>
+          <p v-if="!failure || failure.nothingChanged" class="text-xs text-muted">この間も、何も変わっていません（全て draft のままです）。直してから「もう一度確かめる」を押すと、最新の内容で最初から確かめます。</p>
+          <p v-else class="text-xs text-warning" data-testid="submit-stuck">openspec-mcp の側で open のまま残っている依頼があります。binone の側は全て draft のままです。盤面は変わっていませんが、openspec-mcp の側を確かめてください。</p>
           <div class="flex flex-wrap gap-2">
             <UButton size="sm" data-testid="submit-retry" @click="choose('retry')">もう一度確かめる</UButton>
-            <UButton v-if="stopped.item" size="sm" color="neutral" variant="outline" data-testid="submit-open-editor" @click="openEditor(stopped.item)">登録の画面を開く（この画面は閉じます）</UButton>
+            <UButton v-if="editTarget" size="sm" color="neutral" variant="outline" data-testid="submit-open-editor" @click="openEditor(editTarget)">登録の画面を開く（この画面は閉じます）</UButton>
             <UButton size="sm" color="error" variant="soft" data-testid="submit-abort" @click="choose('abort')">中断</UButton>
           </div>
         </div>

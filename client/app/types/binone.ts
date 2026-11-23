@@ -79,8 +79,21 @@ export interface RequestSummary {
   updatedMs: number;
 }
 
-/** Why a draft cannot become a todo. `message` is the server's sentence; `missing` is for `incomplete`. */
-export type SubmitCode = "not_found" | "not_draft" | "version_conflict" | "incomplete";
+/**
+ * Why a draft cannot become a todo. `message` is the server's sentence; `missing` is for `incomplete`.
+ * The last four come only from a failed batch of requirements kept in openspec-mcp: `content_update_failed`
+ * is the draft whose update failed (a cause); `rolled_back`, `rollback_failed` and `not_attempted` are
+ * what happened to the others (never a cause).
+ */
+export type SubmitCode =
+  | "not_found"
+  | "not_draft"
+  | "version_conflict"
+  | "incomplete"
+  | "content_update_failed"
+  | "rolled_back"
+  | "rollback_failed"
+  | "not_attempted";
 
 /** The dry run of draft -> todo. A refusal is data (`ok: false`), not an error. */
 export interface SubmitCheck {
@@ -99,7 +112,7 @@ export interface SubmitBatch {
   results: SubmitCheck[];
   /** The requests as they are now; only when `ok`. */
   requests: Request[];
-  /** Ids that stayed `open` in openspec-mcp after a failed batch (normally empty). */
+  /** Ids that stayed `open` in openspec-mcp (binone has them as drafts) after a failed batch. Normally empty. */
   unreverted?: string[];
 }
 

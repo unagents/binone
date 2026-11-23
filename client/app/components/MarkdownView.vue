@@ -29,4 +29,7 @@ const html = computed(() => renderMarkdown(props.source));
 .md :deep(hr) { border-color: var(--ui-border); }
 .md :deep(.md-link) { color: var(--ui-primary); text-decoration: underline; text-decoration-style: dotted; cursor: default; }
 .md :deep(.md-image) { color: var(--ui-text-muted); }
+.md :deep(.md-left) { text-align: left; }
+.md :deep(.md-center) { text-align: center; }
+.md :deep(.md-right) { text-align: right; }
 </style>

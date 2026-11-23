@@ -2,7 +2,9 @@ import { describe, expect, it } from "vitest";
 import type { ApiError } from "../app/utils/api/errors";
 import type { SubmitBatch, SubmitCheck } from "../app/types/binone";
 import {
+  analyzeBatchFailure,
   canDrop,
+  describeEffect,
   describeMissing,
   describeSubmitCode,
   grabbedIds,
@@ -260,5 +262,56 @@ describe("drag and selection", () => {
   it("toggles a card in the selection", () => {
     expect(toggleSelected(["a"], "b")).toEqual(["a", "b"]);
     expect(toggleSelected(["a", "b"], "a")).toEqual(["b"]);
+  });
+});
+
+describe("a batch that failed after something was sent to openspec-mcp", () => {
+  const result = (id: string, code: SubmitCheck["code"]): SubmitCheck => ({ id, ok: false, code, missing: [], message: `${id}:${code}` });
+  const batch = (results: SubmitCheck[], unreverted: string[] = []): SubmitBatch => ({ ok: false, results, requests: [], unreverted });
+
+  it("takes the failed update as the cause, not the rolled back draft that comes first", () => {
+    const failure = analyzeBatchFailure(items, batch([result("1", "rolled_back"), result("2", "content_update_failed"), result("3", "not_attempted")]));
+    expect(failure.causes.map((c) => c.item.id)).toEqual(["2"]);
+    expect(failure.effects.map((e) => [e.item.id, e.effect])).toEqual([["1", "rolled_back"], ["3", "not_attempted"]]);
+    expect(failure.nothingChanged).toBe(true);
+    expect(failure.stuck).toEqual([]);
+  });
+
+  it("never takes a rollback_failed or not_attempted draft for the cause", () => {
+    const failure = analyzeBatchFailure(items, batch([result("1", "rollback_failed"), result("2", "not_attempted"), result("3", "content_update_failed")], ["1"]));
+    expect(failure.causes.map((c) => c.item.id)).toEqual(["3"]);
+    expect(failure.stuck.map((i) => i.id)).toEqual(["1"]);
+    expect(failure.nothingChanged).toBe(false);
+  });
+
+  it("keeps a draft the check refused as a cause, with its code", () => {
+    const failure = analyzeBatchFailure(items, batch([{ ...pass("1") }, incomplete("2"), pass("3")]));
+    expect(failure.causes.map((c) => [c.item.id, c.check.code])).toEqual([["2", "incomplete"]]);
+    expect(failure.effects).toEqual([]);
+  });
+
+  it("says nothing changed only when unreverted is empty", () => {
+    expect(analyzeBatchFailure(items, batch([result("1", "content_update_failed")])).nothingChanged).toBe(true);
+    expect(analyzeBatchFailure(items, batch([result("1", "content_update_failed")], ["1"])).nothingChanged).toBe(false);
+    // an id in unreverted without a rollback_failed result still counts as stuck
+    const failure = analyzeBatchFailure(items, batch([result("1", "content_update_failed"), result("2", "rolled_back")], ["2"]));
+    expect(failure.stuck.map((i) => i.id)).toEqual(["2"]);
+  });
+
+  it("stops on the batch failure with the causes, instead of the first not-ok result", async () => {
+    const h = harness({
+      choices: ["abort"],
+      batch: (list) => batch(list.map((i) => result(i.id, i.id === "1" ? "rolled_back" : i.id === "2" ? "content_update_failed" : "not_attempted"))),
+    });
+    await runSubmitFlow(items, h.hooks);
+    const stop = h.stops[0]!;
+    expect(stop.kind).toBe("batch");
+    if (stop.kind === "batch") expect(stop.failure.causes.map((c) => c.item.id)).toEqual(["2"]);
+  });
+
+  it("words the rolled back and the stuck drafts", () => {
+    expect(describeEffect("rolled_back")).toBe("draft に戻しました");
+    expect(describeEffect("rollback_failed")).toBe("openspec-mcp の側で open のまま残っています。binone の側は draft のままです");
+    expect(describeSubmitCode("content_update_failed")).not.toBe("content_update_failed");
   });
 });

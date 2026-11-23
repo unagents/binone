@@ -26,6 +26,8 @@ export interface BatchItem {
 /** What stops the flow: the server's refusal of one draft, or a call that failed. */
 export type StopProblem =
   | { kind: "refused"; item: BatchItem; check: SubmitCheck }
+  /** The batch failed after something was sent to openspec-mcp: the causes and what became of the others. */
+  | { kind: "batch"; failure: BatchFailure }
   | { kind: "error"; item: BatchItem | null; error: ApiError };
 
 export type StopChoice = "retry" | "abort";
@@ -59,6 +61,74 @@ export type SubmitFlowOutcome =
 export function asApiError(error: unknown): ApiError {
   if (typeof error === "object" && error !== null && "kind" in error && "detail" in error) return error as ApiError;
   return { kind: "internal", detail: String(error) };
+}
+
+/** What became of a draft that was not the cause of a failed batch. */
+export type BatchEffect = "rolled_back" | "rollback_failed" | "not_attempted";
+
+const EFFECT_CODES: readonly string[] = ["rolled_back", "rollback_failed", "not_attempted"];
+/** The codes of a failed batch of requirements; the others are the dry run's refusals. */
+const SENT_CODES: readonly string[] = ["content_update_failed", ...EFFECT_CODES];
+
+export interface BatchFailure {
+  /** The drafts that made the batch fail: `content_update_failed` and the ones the check refused. Never a rolled back one. */
+  causes: { item: BatchItem; check: SubmitCheck }[];
+  /** The drafts that were not the cause. A `rollback_failed` one (or one in `unreverted`) is `rollback_failed`. */
+  effects: { item: BatchItem; effect: BatchEffect }[];
+  /** The drafts that stayed `open` in openspec-mcp while binone has them as drafts. */
+  stuck: BatchItem[];
+  /** True only when nothing changed anywhere: no draft stayed `open` in openspec-mcp. */
+  nothingChanged: boolean;
+}
+
+/**
+ * Sorts the results of a failed batch into the causes and the rest. A rolled back, not attempted or
+ * rollback-failed draft is never taken for a cause, even when it comes first in the list.
+ */
+export function analyzeBatchFailure(items: readonly BatchItem[], batch: SubmitBatch): BatchFailure {
+  const unreverted = new Set(batch.unreverted ?? []);
+  const find = (id: string): BatchItem => items.find((candidate) => candidate.id === id) ?? { id, title: "", version: 0 };
+  const causes: BatchFailure["causes"] = [];
+  const effects: BatchFailure["effects"] = [];
+  const stuckIds = new Set(unreverted);
+  for (const check of batch.results) {
+    if (check.ok) continue;
+    if (check.code !== null && EFFECT_CODES.includes(check.code)) {
+      if (check.code === "rollback_failed") stuckIds.add(check.id);
+      effects.push({ item: find(check.id), effect: check.code as BatchEffect });
+    } else {
+      causes.push({ item: find(check.id), check });
+    }
+  }
+  for (const id of unreverted) {
+    // An id the server lists as unreverted but did not mark as such is still stuck.
+    if (!effects.some(({ item }) => item.id === id) && !causes.some(({ item }) => item.id === id)) effects.push({ item: find(id), effect: "rollback_failed" });
+  }
+  return { causes, effects, stuck: [...stuckIds].map(find), nothingChanged: stuckIds.size === 0 };
+}
+
+/** What the user reads for a draft that was not the cause. */
+export function describeEffect(effect: BatchEffect): string {
+  switch (effect) {
+    case "rolled_back":
+      return "draft に戻しました";
+    case "rollback_failed":
+      return "openspec-mcp の側で open のまま残っています。binone の側は draft のままです";
+    case "not_attempted":
+      return "送っていません（draft のままです）";
+  }
+}
+
+/** The title as the screens show it. */
+export function titleOf(item: BatchItem): string {
+  return item.title || "（題名なし）";
+}
+
+/** The draft to stop on when the batch failed: what the dry run refuses stays as it was; the rest is a batch failure. */
+function batchProblem(items: readonly BatchItem[], batch: SubmitBatch): StopProblem {
+  const sent = batch.results.some((result) => !result.ok && result.code !== null && SENT_CODES.includes(result.code)) || (batch.unreverted ?? []).length > 0;
+  if (sent) return { kind: "batch", failure: analyzeBatchFailure(items, batch) };
+  return firstRefusal(items, batch);
 }
 
 /** The first draft the batch refused, with the server's reason. */
@@ -101,7 +171,7 @@ export async function runSubmitFlow(grabbed: readonly BatchItem[], hooks: Submit
       try {
         const batch = await hooks.submit(items);
         if (batch.ok) return { status: "submitted", batch };
-        problem = firstRefusal(items, batch);
+        problem = batchProblem(items, batch);
       } catch (error) {
         const apiError = asApiError(error);
         return apiError.kind === "outcome_unknown" ? { status: "unknown", error: apiError } : { status: "failed", error: apiError };
@@ -125,6 +195,10 @@ const CODE_TEXT: Record<SubmitCode, string> = {
   not_draft: "もう draft ではありません（他で todo などに変わりました）",
   version_conflict: "確かめた後に、他で更新されました（版が変わりました）",
   incomplete: "todo にするには足りない項目があります",
+  content_update_failed: "openspec-mcp が open への更新を受け付けませんでした",
+  rolled_back: describeEffect("rolled_back"),
+  rollback_failed: describeEffect("rollback_failed"),
+  not_attempted: describeEffect("not_attempted"),
 };
 
 /** What the user reads for a refusal's code. An unknown code is shown as it is. */
