@@ -2,11 +2,6 @@
 // into the lane before them, and grouping. Plain functions on plain data, so they can be tested.
 import type { LaneDef, LaneName, RequestSummary } from "~/types/binone";
 
-/** The lane that can never be hidden and takes the first place. */
-export const FIRST_LANE = "draft";
-/** The lane a draft can be dropped on. */
-export const SUBMIT_LANE = "todo";
-
 export interface SwimlaneFilter {
   /** One project, or none. */
   project: string | null;
@@ -99,7 +94,7 @@ export interface SwimlaneBoard {
   orphans: RequestSummary[];
 }
 
-export function laneLabel(lane: LaneDef): string {
+export function swimlaneLabel(lane: LaneDef): string {
   return lane.label && lane.label !== "" ? lane.label : lane.name;
 }
 
@@ -141,7 +136,7 @@ export function buildBoard(items: readonly RequestSummary[], lanes: readonly Lan
   return {
     columns: shown.map((lane) => {
       const list = byLane.get(lane.name) ?? [];
-      return { lane: lane.name, label: laneLabel(lane), count: list.length, groups: groupItems(list, options.groupBy) };
+      return { lane: lane.name, label: swimlaneLabel(lane), count: list.length, groups: groupItems(list, options.groupBy) };
     }),
     orphans,
   };
