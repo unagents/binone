@@ -1,0 +1,21 @@
+[package]
+name = "binone"
+version = "0.1.0"
+description = "binone client"
+authors = ["grrow"]
+edition = "2021"
+
+[lib]
+name = "binone_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-store = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# The server is reached over plain HTTP on the user's network, so no TLS backend is built in.
+reqwest = { version = "0.13", default-features = false, features = ["json"] }
