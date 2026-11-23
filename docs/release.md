@@ -29,7 +29,7 @@ hosted elsewhere, pass its git URL as a second argument: `brew tap <user>/<name>
 ## Checking and updating from the app
 
 The native side asks GitHub's public API (no credentials) for the latest release of the
-client's repository, once after startup and when "確認" on the settings screen is pressed; there
+client's repository, once after startup and when "更新を確認" on the settings screen is pressed; there
 is no periodic check. The tag, without its leading `v`, is compared with the running version as
 three numbers (`0.10.0` is newer than `0.9.0`). Drafts, prereleases and tags that are not a plain
 `X.Y.Z` are not candidates. A failure (no network, rate limit, an answer of another shape)

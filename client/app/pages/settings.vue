@@ -86,7 +86,7 @@ async function save() {
       <template #header>
         <div class="flex items-center justify-between gap-3">
           <h2 class="text-sm font-medium text-highlighted">アプリの版</h2>
-          <UButton size="xs" color="neutral" variant="outline" :loading="checking" data-testid="check-update" @click="runCheck">確認</UButton>
+          <UButton size="xs" color="neutral" variant="outline" :loading="checking" data-testid="check-update" @click="runCheck">更新を確認</UButton>
         </div>
       </template>
       <dl class="grid grid-cols-[auto_1fr] gap-x-6 gap-y-1 text-sm" data-testid="version-info">
