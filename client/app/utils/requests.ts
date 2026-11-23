@@ -1,6 +1,6 @@
 // The request screens' pure parts: the draft form, what the list shows, what the status shows.
 // Nothing here talks to the server; the screens call these and the API separately.
-import type { DraftInput, HistoryEntry, LaneDef, MissingSource, Request, RequestDetail, Step } from "~/types/binone";
+import type { DraftInput, HistoryEntry, LaneDef, MissingSource, Request, RequestDetail, ServerInfo, Step } from "~/types/binone";
 
 /** The editable fields of a draft, as the form holds them. */
 export interface DraftForm {
@@ -18,7 +18,29 @@ export interface DraftBase {
   version: number;
   /** Not editable here; sent back unchanged so saving does not blank what the agent set. */
   change: string | null;
+  /**
+   * The saved body could not be read, and this screen has not written one since: the form's body
+   * is not the saved one, so it is never sent (an empty text would replace the saved body).
+   */
+  bodyUnreadable?: boolean;
 }
+
+/** The body could not be read (`body` is `null`, or the server says `bodyMissing`). */
+export function isBodyUnreadable(request: Pick<Request, "body" | "bodyMissing">): boolean {
+  return request.body === null || request.bodyMissing === true;
+}
+
+/** The same for the status screen's record (snake_case), whose missing source also names the item. */
+export function isDetailBodyUnreadable(detail: Pick<RequestDetail, "request" | "missing_sources">): boolean {
+  return (
+    detail.request.body === null ||
+    detail.request.body_missing === true ||
+    detail.missing_sources.some((s) => s.item === "body")
+  );
+}
+
+/** What is shown in place of a body that cannot be read (not an empty body). */
+export const BODY_UNREADABLE_TEXT = "本文を取り出せません（openspec-mcp に本文を読む口がありません）";
 
 export function emptyForm(project = ""): DraftForm {
   return { title: "", body: "", project, kind: "", tags: [], protocol: "" };
@@ -27,7 +49,7 @@ export function emptyForm(project = ""): DraftForm {
 export function formFromRequest(request: Request): DraftForm {
   return {
     title: request.title,
-    body: request.body,
+    body: request.body ?? "",
     project: request.project,
     kind: request.kind,
     tags: [...request.tags],
@@ -53,23 +75,84 @@ export function addTag(tags: readonly string[], typed: string): string[] {
 /**
  * What `saveDraft` takes. A new request has no `base`; an update sends the version it read, so a
  * request that moved on in between is a conflict rather than being overwritten silently.
+ *
+ * An update sends only the title and the body that changed since `saved` (the server leaves out
+ * what it is not given), and never a body that could not be read. Without `saved` every item that
+ * may be sent is sent. A blank title is not sent on an update.
  */
-export function toDraftInput(form: DraftForm, base: DraftBase | null, versionOverride?: number): DraftInput {
+export function toDraftInput(form: DraftForm, base: DraftBase | null, versionOverride?: number, saved?: DraftForm): DraftInput {
   const protocol = form.protocol.trim();
   const input: DraftInput = {
-    title: form.title,
-    body: form.body,
     project: form.project,
     kind: form.kind,
     tags: normalizeTags(form.tags),
     protocol: protocol === "" ? null : protocol,
   };
-  if (base) {
-    input.id = base.id;
-    input.version = versionOverride ?? base.version;
-    input.change = base.change;
+  if (!base) {
+    input.title = form.title;
+    input.body = form.body;
+    return input;
   }
+  input.id = base.id;
+  input.version = versionOverride ?? base.version;
+  input.change = base.change;
+  if (form.title.trim() !== "" && (!saved || form.title !== saved.title)) input.title = form.title;
+  if (!base.bodyUnreadable && (!saved || form.body !== saved.body)) input.body = form.body;
   return input;
+}
+
+/**
+ * What the screen holds after a save succeeded. The answer to a save with an item left out does
+ * not carry that item (title empty, body missing), so the item left out keeps what the screen had.
+ */
+export function afterSave(
+  form: DraftForm,
+  saved: DraftForm,
+  input: DraftInput,
+  result: Request,
+  previous: DraftBase | null,
+): { form: DraftForm; saved: DraftForm; base: DraftBase } {
+  const fromServer = formFromRequest(result);
+  const titleSent = input.title !== undefined;
+  const bodySent = input.body !== undefined;
+  const nextSaved: DraftForm = {
+    ...fromServer,
+    title: titleSent ? input.title ?? "" : saved.title,
+    body: bodySent ? input.body ?? "" : saved.body,
+  };
+  return {
+    // What the user typed in an item that was not sent stays on screen (and stays "changed").
+    form: { ...nextSaved, title: titleSent ? nextSaved.title : form.title, body: bodySent ? nextSaved.body : form.body },
+    saved: nextSaved,
+    base: {
+      id: result.id,
+      version: result.version,
+      change: result.change,
+      // Unreadable stays so unless this save wrote a body (the answer says "missing" when it sent none,
+      // also for a body this screen knows, so the answer is not what decides).
+      bodyUnreadable: bodySent ? false : (previous?.bodyUnreadable ?? false),
+    },
+  };
+}
+
+export function baseFromRequest(request: Request): DraftBase {
+  return { id: request.id, version: request.version, change: request.change, bodyUnreadable: isBodyUnreadable(request) };
+}
+
+/**
+ * One save: builds what is sent, sends it once and returns what the screen holds afterwards. It
+ * does not try again; a failure (an unknown outcome included) is thrown to the caller as it is.
+ */
+export async function saveOnce(
+  send: (input: DraftInput) => Promise<Request>,
+  form: DraftForm,
+  base: DraftBase | null,
+  saved: DraftForm,
+  versionOverride?: number,
+): Promise<{ request: Request; form: DraftForm; saved: DraftForm; base: DraftBase }> {
+  const input = toDraftInput(form, base, versionOverride, saved);
+  const request = await send(input);
+  return { request, ...afterSave(form, saved, input, request, base) };
 }
 
 export function sameForm(a: DraftForm, b: DraftForm): boolean {
@@ -84,12 +167,13 @@ export function sameForm(a: DraftForm, b: DraftForm): boolean {
 }
 
 /** What must be filled before a draft becomes a todo. The server checks again. */
-export function submitProblems(form: DraftForm): string[] {
+export function submitProblems(form: DraftForm, base: Pick<DraftBase, "bodyUnreadable"> | null = null): string[] {
   const problems: string[] = [];
   if (form.title.trim() === "") problems.push("タイトルを入れてください");
   if (form.project.trim() === "") problems.push("プロジェクトを選んでください");
   if (form.kind.trim() === "") problems.push("種別を選んでください");
-  if (form.body.trim() === "") problems.push("本文を入れてください");
+  // A body that cannot be read is not known to be empty; the server judges it.
+  if (!base?.bodyUnreadable && form.body.trim() === "") problems.push("本文を入れてください");
   return problems;
 }
 
@@ -182,4 +266,20 @@ export function canEditDraft(detail: Pick<RequestDetail, "allowed_operations">):
  */
 export function missingArtifactSources(sources: readonly MissingSource[]): MissingSource[] {
   return sources.filter((s) => s.service === "open_spec");
+}
+
+/**
+ * Where a save goes, in a short line for the edge of the edit screen. `null` when the server did
+ * not say (an older server has no such field): then nothing is claimed.
+ */
+export function describeSaveTarget(info: Partial<ServerInfo> | null): string | null {
+  if (!info || typeof info.contentBackend !== "string") return null;
+  if (info.contentBackend === "requirement") {
+    if (info.contentSupported === false) {
+      const missing = info.contentMissingTools ?? [];
+      return `保存先: requirement（openspec-mcp）— 未対応のため保存できません${missing.length ? `（欠けているツール: ${missing.join("、")}）` : ""}`;
+    }
+    return "保存先: requirement（openspec-mcp）";
+  }
+  return info.contentBackend === "sqlite" ? "保存先: サーバーの中" : `保存先: ${info.contentBackend}`;
 }

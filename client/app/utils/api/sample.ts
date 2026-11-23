@@ -111,7 +111,7 @@ export function createSampleServer(options: SampleOptions = {}): NativeCall {
   }
 
   const operations: Record<OperationName, (args: Record<string, unknown>) => unknown> = {
-    serverInfo: () => ({ version: "sample" }),
+    serverInfo: () => ({ version: "sample", contentBackend: "sqlite", contentSupported: true, contentMissingTools: [], contentDetail: null }),
     requests: (a) => filtered(a.filter as RequestFilter | null | undefined),
     request: (a) => find(String(a.id)),
     requestDetail: (a) => detail(find(String(a.id))),
@@ -132,7 +132,8 @@ export function createSampleServer(options: SampleOptions = {}): NativeCall {
       }
       const current = find(id);
       if (current.version !== a.version) fail("conflict", "version moved on");
-      Object.assign(current, { title: String(a.title ?? ""), body: String(a.body ?? ""), project: String(a.project ?? ""), kind: String(a.kind ?? ""), tags: (a.tags as string[] | undefined) ?? [], protocol: typeof a.protocol === "string" && a.protocol !== "" ? a.protocol : null, version: current.version + 1, updatedMs: Date.now() });
+      // A title or a body that is not given is left as it is.
+      Object.assign(current, { title: typeof a.title === "string" ? a.title : current.title, body: typeof a.body === "string" ? a.body : current.body, project: String(a.project ?? ""), kind: String(a.kind ?? ""), tags: (a.tags as string[] | undefined) ?? [], protocol: typeof a.protocol === "string" && a.protocol !== "" ? a.protocol : null, version: current.version + 1, updatedMs: Date.now() });
       return current;
     },
     submitRequest: (a) => {
@@ -196,5 +197,5 @@ export function createSampleServer(options: SampleOptions = {}): NativeCall {
 }
 
 function sample(id: string, title: string, project: string, kind: string, tags: string[], lane: string, updatedMs: number): Request {
-  return { id, version: 1, title, body: "", project, kind, tags, protocol: null, change: null, lane, createdMs: updatedMs - 60_000, updatedMs };
+  return { id, version: 1, title, body: "", bodyMissing: false, project, kind, tags, protocol: null, change: null, lane, createdMs: updatedMs - 60_000, updatedMs };
 }

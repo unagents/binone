@@ -1,14 +1,17 @@
 <script setup lang="ts">
 import { toApiError, type ApiError } from "~/utils/api/errors";
-import type { Request } from "~/types/binone";
+import type { Request, ServerInfo } from "~/types/binone";
 import {
+  BODY_UNREADABLE_TEXT,
   addTag,
+  baseFromRequest,
   emptyForm,
   formFromRequest,
   formatDateTime,
+  saveOnce,
   sameForm,
   submitProblems,
-  toDraftInput,
+  describeSaveTarget,
   type DraftBase,
   type DraftForm,
 } from "~/utils/requests";
@@ -51,12 +54,22 @@ const stateText = computed(() => {
 function apply(request: Request) {
   Object.assign(form, formFromRequest(request));
   savedForm.value = formFromRequest(request);
-  base.value = { id: request.id, version: request.version, change: request.change };
+  base.value = baseFromRequest(request);
   lane.value = request.lane;
 }
 
+// Where a save goes (the server says), shown small at the edge. Not knowing it is not an error here.
+const info = ref<ServerInfo | null>(null);
+const storeText = computed(() => describeSaveTarget(info.value));
+const bodyUnreadable = computed(() => base.value?.bodyUnreadable === true);
+
 async function loadOptions() {
   optionsError.value = null;
+  try {
+    info.value = await api.serverInfo();
+  } catch {
+    info.value = null;
+  }
   try {
     projects.value = await api.projects();
   } catch (e) {
@@ -118,11 +131,15 @@ async function save(versionOverride?: number): Promise<Request | null> {
   actionError.value = null;
   conflict.value = false;
   try {
-    const saved = await api.saveDraft(toDraftInput(form, base.value, versionOverride));
-    apply(saved);
+    // Sent once. A failure, an unknown outcome included, is shown and the input stays as typed.
+    const done = await saveOnce(api.saveDraft, form, base.value, savedForm.value, versionOverride);
+    Object.assign(form, done.form);
+    savedForm.value = done.saved;
+    base.value = done.base;
+    lane.value = done.request.lane;
     savedAt.value = Date.now();
-    if (loadedId.value !== saved.id) await router.replace({ path: "/requests/new", query: { id: saved.id } });
-    return saved;
+    if (loadedId.value !== done.request.id) await router.replace({ path: "/requests/new", query: { id: done.request.id } });
+    return done.request;
   } catch (e) {
     fail(e);
     return null;
@@ -138,7 +155,7 @@ async function onSave() {
 
 async function onSubmit() {
   if (busy.value) return;
-  problems.value = submitProblems(form);
+  problems.value = submitProblems(form, base.value);
   if (problems.value.length) return;
   busy.value = "submit";
   const saved = !base.value || dirty.value ? await save() : { id: base.value.id, version: base.value.version };
@@ -172,7 +189,8 @@ async function onOverwrite() {
   busy.value = "overwrite";
   try {
     const latest = await api.request(base.value.id);
-    base.value = { id: latest.id, version: latest.version, change: latest.change };
+    // What this screen knows of the body stays as it was: the answer may say "unreadable" for a body it holds.
+    base.value = { id: latest.id, version: latest.version, change: latest.change, bodyUnreadable: base.value.bodyUnreadable };
     if (latest.lane !== "draft") {
       lane.value = latest.lane;
       conflict.value = false;
@@ -229,6 +247,7 @@ async function createProject() {
           <UButton size="sm" :disabled="!editable || !!loadError" :loading="busy === 'submit'" data-testid="submit" @click="onSubmit">todo 化</UButton>
         </template>
 
+        <p v-if="storeText" class="text-xs text-muted" data-testid="save-target">{{ storeText }}</p>
         <p v-if="loading" class="text-sm text-muted" data-testid="loading">読み込んでいます…</p>
         <ApiErrorAlert v-if="loadError" :error="loadError" />
         <ApiErrorAlert v-if="optionsError" :error="optionsError" />
@@ -249,7 +268,7 @@ async function createProject() {
               </div>
             </template>
           </UAlert>
-          <ApiErrorAlert v-if="actionError" :error="actionError" />
+          <ApiErrorAlert v-if="actionError" :error="actionError" keeps-input />
           <UAlert v-if="problems.length" color="warning" variant="subtle" title="todo 化の前に確かめてください" data-testid="problems">
             <template #description>
               <ul class="list-disc pl-5"><li v-for="p in problems" :key="p">{{ p }}</li></ul>
@@ -286,15 +305,22 @@ async function createProject() {
               </UFormField>
             </div>
 
-            <div class="flex items-center gap-2">
-              <UButton type="button" size="xs" :variant="previewing ? 'outline' : 'solid'" color="neutral" data-testid="body-edit" @click="previewing = false">書く</UButton>
-              <UButton type="button" size="xs" :variant="previewing ? 'solid' : 'outline'" color="neutral" data-testid="body-preview-toggle" @click="previewing = true">プレビュー</UButton>
-            </div>
-            <div v-if="previewing" class="min-h-48 rounded-md border border-default p-3" data-testid="body-preview">
-              <MarkdownView v-if="form.body.trim() !== ''" :source="form.body" />
-              <p v-else class="text-sm text-muted">（本文なし）</p>
-            </div>
-            <UTextarea v-else v-model="form.body" :rows="14" autoresize class="w-full" placeholder="作業指示を Markdown で書く" aria-label="作業指示（Markdown）" data-testid="body" />
+            <UAlert v-if="bodyUnreadable" color="warning" variant="subtle" :title="BODY_UNREADABLE_TEXT" data-testid="body-unreadable">
+              <template #description>
+                <p>本文は空ではなく、読めていません。題名と管理項目は編集して保存できます。保存しても本文は送らないので、今の本文は書き換わりません。</p>
+              </template>
+            </UAlert>
+            <template v-else>
+              <div class="flex items-center gap-2">
+                <UButton type="button" size="xs" :variant="previewing ? 'outline' : 'solid'" color="neutral" data-testid="body-edit" @click="previewing = false">書く</UButton>
+                <UButton type="button" size="xs" :variant="previewing ? 'solid' : 'outline'" color="neutral" data-testid="body-preview-toggle" @click="previewing = true">プレビュー</UButton>
+              </div>
+              <div v-if="previewing" class="min-h-48 rounded-md border border-default p-3" data-testid="body-preview">
+                <MarkdownView v-if="form.body.trim() !== ''" :source="form.body" />
+                <p v-else class="text-sm text-muted">（本文なし）</p>
+              </div>
+              <UTextarea v-else v-model="form.body" :rows="14" autoresize class="w-full" placeholder="作業指示を Markdown で書く" aria-label="作業指示（Markdown）" data-testid="body" />
+            </template>
           </fieldset>
         </template>
       </ScreenFrame>

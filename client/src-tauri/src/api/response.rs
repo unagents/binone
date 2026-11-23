@@ -44,6 +44,7 @@ pub fn interpret(operation: Operation, status: u16, body: &[u8]) -> Result<Value
 /// layer itself (a field or type this server does not have, a malformed document).
 fn graphql_error(error: &Value) -> ApiError {
     let message = error.get("message").and_then(Value::as_str).unwrap_or("");
+    let extensions = error.get("extensions");
     let code = error.pointer("/extensions/code").and_then(Value::as_str);
     let kind = match code {
         Some("INVALID_INPUT") => ApiErrorKind::InvalidInput,
@@ -61,7 +62,29 @@ fn graphql_error(error: &Value) -> ApiError {
         (ApiErrorKind::BadResponse, None) => "POST /graphql: a GraphQL error without a code".to_owned(),
         _ => message.to_owned(),
     };
-    ApiError::new(kind, detail)
+    let error = ApiError::new(kind, detail);
+    match kind {
+        ApiErrorKind::ExternalUnavailable | ApiErrorKind::OutcomeUnknown => {
+            let reason = error_extra_reason(extensions);
+            let missing = extensions
+                .and_then(|e| e.get("missing"))
+                .and_then(Value::as_array)
+                .map(|items| items.iter().filter_map(Value::as_str).take(20).map(truncate_item).collect())
+                .unwrap_or_default();
+            error.with_extras(reason, missing)
+        }
+        _ => error,
+    }
+}
+
+/// Only the reasons this client knows are passed on, so that the server's text is not echoed as is.
+fn error_extra_reason(extensions: Option<&Value>) -> Option<String> {
+    let reason = extensions?.get("reason")?.as_str()?;
+    matches!(reason, "unsupported_by_openspec_mcp" | "outcome_unknown").then(|| reason.to_owned())
+}
+
+fn truncate_item(item: &str) -> String {
+    item.chars().take(100).collect()
 }
 
 /// async-graphql's wording for a document that names something the schema lacks.
@@ -149,6 +172,55 @@ mod tests {
             json!({"errors": [{"message": "conflict: version 2 is not 1", "extensions": {"code": "CONFLICT"}}]}),
         );
         assert_eq!(error.detail, "conflict: version 2 is not 1");
+    }
+
+    #[test]
+    fn an_unsupported_openspec_mcp_names_the_tools_it_lacks() {
+        let error = failed(
+            Operation::SaveDraft,
+            json!({"errors": [{"message": "openspec-mcp 未対応: missing create, update", "extensions": {
+                "code": "EXTERNAL_UNAVAILABLE", "reason": "unsupported_by_openspec_mcp", "missing": ["create", "update"]}}]}),
+        );
+        assert_eq!(error.kind, ApiErrorKind::ExternalUnavailable);
+        assert_eq!(error.reason.as_deref(), Some("unsupported_by_openspec_mcp"));
+        assert_eq!(error.missing, ["create", "update"]);
+        let sent = serde_json::to_value(&error).unwrap();
+        assert_eq!(sent["reason"], "unsupported_by_openspec_mcp");
+        assert_eq!(sent["missing"], json!(["create", "update"]));
+    }
+
+    #[test]
+    fn a_lost_answer_is_an_unknown_outcome_without_the_attempted_content_passed_on() {
+        let error = failed(
+            Operation::SaveDraft,
+            json!({"errors": [{"message": "external outcome unknown: openspec: timeout", "extensions": {
+                "code": "EXTERNAL_OUTCOME_UNKNOWN", "reason": "outcome_unknown", "attempted": {"body": "secret text"}}}]}),
+        );
+        assert_eq!(error.kind, ApiErrorKind::OutcomeUnknown);
+        assert_eq!(error.reason.as_deref(), Some("outcome_unknown"));
+        assert!(!serde_json::to_string(&error).unwrap().contains("secret text"));
+    }
+
+    #[test]
+    fn an_unavailable_service_has_no_reason_and_other_errors_carry_no_extras() {
+        let error = failed(
+            Operation::SaveDraft,
+            json!({"errors": [{"message": "m", "extensions": {"code": "EXTERNAL_UNAVAILABLE"}}]}),
+        );
+        assert_eq!(error.kind, ApiErrorKind::ExternalUnavailable);
+        assert_eq!((error.reason, error.missing.len()), (None, 0));
+        // A reason this client does not know is not passed on.
+        let error = failed(
+            Operation::SaveDraft,
+            json!({"errors": [{"message": "m", "extensions": {"code": "EXTERNAL_UNAVAILABLE", "reason": "<b>x</b>"}}]}),
+        );
+        assert_eq!(error.reason, None);
+        let error = failed(
+            Operation::SaveDraft,
+            json!({"errors": [{"message": "m", "extensions": {"code": "CONFLICT", "reason": "unsupported_by_openspec_mcp", "missing": ["x"]}}]}),
+        );
+        assert_eq!((error.reason, error.missing.len()), (None, 0));
+        assert_eq!(serde_json::to_value(&ApiError::new(ApiErrorKind::Conflict, "d")).unwrap(), json!({"kind": "conflict", "detail": "d"}));
     }
 
     #[test]

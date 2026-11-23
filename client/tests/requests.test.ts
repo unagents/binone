@@ -21,6 +21,7 @@ const request: Request = {
   version: 3,
   title: "t",
   body: "b",
+  bodyMissing: false,
   project: "p",
   kind: "task",
   tags: ["x"],

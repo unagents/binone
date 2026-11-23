@@ -51,11 +51,23 @@ pub enum ApiErrorKind {
 pub struct ApiError {
     pub kind: ApiErrorKind,
     pub detail: String,
+    /// The server's `extensions.reason`, when it gave one (`unsupported_by_openspec_mcp` …).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    /// The server's `extensions.missing`: the tools (or inputs) of openspec-mcp that are lacking.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub missing: Vec<String>,
 }
 
 impl ApiError {
     pub fn new(kind: ApiErrorKind, detail: impl Into<String>) -> Self {
-        Self { kind, detail: truncate(detail.into()) }
+        Self { kind, detail: truncate(detail.into()), reason: None, missing: Vec::new() }
+    }
+
+    pub fn with_extras(mut self, reason: Option<String>, missing: Vec<String>) -> Self {
+        self.reason = reason;
+        self.missing = missing;
+        self
     }
 }
 
@@ -110,7 +122,12 @@ pub fn redact_value(value: Value, key: &str) -> Value {
 }
 
 pub fn redact_error(error: ApiError, key: &str) -> ApiError {
-    ApiError { kind: error.kind, detail: redact(&error.detail, key) }
+    ApiError {
+        kind: error.kind,
+        detail: redact(&error.detail, key),
+        reason: error.reason.map(|r| redact(&r, key)),
+        missing: error.missing.iter().map(|m| redact(m, key)).collect(),
+    }
 }
 
 #[cfg(test)]

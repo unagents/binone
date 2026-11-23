@@ -34,7 +34,14 @@ export const API_ERROR_KINDS: readonly ApiErrorKind[] = [
 export interface ApiError {
   kind: ApiErrorKind;
   detail: string;
+  /** The server's reason, when it gave one the app knows (see `UNSUPPORTED_BY_OPENSPEC_MCP`). */
+  reason?: string;
+  /** The tools of openspec-mcp that are lacking, for `unsupported_by_openspec_mcp`. */
+  missing?: string[];
 }
+
+/** `reason` of an `external_unavailable` that says openspec-mcp lacks what keeping requests needs. */
+export const UNSUPPORTED_BY_OPENSPEC_MCP = "unsupported_by_openspec_mcp";
 
 export function isApiError(value: unknown): value is ApiError {
   if (typeof value !== "object" || value === null) return false;
@@ -54,7 +61,21 @@ export function pointsToConnection(kind: ApiErrorKind): boolean {
 }
 
 /** What the user reads: what happened and what to check. `address` is the server's address. */
-export function describeApiError(kind: ApiErrorKind, address = ""): { title: string; description: string; hint?: string } {
+export function describeApiError(
+  kind: ApiErrorKind,
+  address = "",
+  extras: Pick<ApiError, "reason" | "missing"> = {},
+): { title: string; description: string; hint?: string } {
+  if (kind === "external_unavailable" && extras.reason === UNSUPPORTED_BY_OPENSPEC_MCP) {
+    const missing = extras.missing ?? [];
+    return {
+      title: "openspec-mcp が未対応のため、受け付けられませんでした",
+      description:
+        "依頼の中身を保管する openspec-mcp に、そのために要るツールがありません" +
+        (missing.length ? `（欠けているツール: ${missing.join("、")}）` : "") +
+        "。別の場所に保存し直すことはしていません。openspec-mcp を対応した版にしてから、もう一度操作してください。",
+    };
+  }
   switch (kind) {
     case "not_connected":
       return { title: "サーバーに接続していません", description: "上の接続の表示から接続先を入れてください。" };
@@ -73,7 +94,7 @@ export function describeApiError(kind: ApiErrorKind, address = ""): { title: str
     case "outcome_unknown":
       return {
         title: "受け付けられたか分かりません",
-        description: "送った後で答えが返りませんでした。同じ操作を重ねて送らず、一覧や状況を読み込み直して結果を確かめてください。",
+        description: "送った後で答えが返りませんでした。アプリは自動では送り直しません。同じ操作を重ねて送らず、一覧や状況を読み込み直して結果を確かめてください。",
       };
     case "server_error":
       return { title: "サーバーの中で失敗しました", description: "少し置いてからもう一度操作してください。続く時は、下の詳細を添えて知らせてください。" };

@@ -33,8 +33,17 @@ export interface SettingsView {
   listen_port: number;
 }
 
+/** Where the content of a request (title, body, state) is kept: binone's own store or openspec-mcp requirements. */
+export type ContentBackend = "sqlite" | "requirement";
+
 export interface ServerInfo {
   version: string;
+  contentBackend: ContentBackend | string;
+  /** `false`: the place named by `contentBackend` cannot be used, so saving fails (it is not saved elsewhere). */
+  contentSupported: boolean;
+  /** The tools of openspec-mcp that are lacking (empty when supported). */
+  contentMissingTools: string[];
+  contentDetail: string | null;
 }
 
 /** One request. `version` is the version read; send it back when saving or submitting. */
@@ -42,7 +51,10 @@ export interface Request {
   id: string;
   version: number;
   title: string;
-  body: string;
+  /** `null` when the body cannot be read (`bodyMissing`). Never an empty text standing in for it. */
+  body: string | null;
+  /** The body lives in openspec-mcp, which has no way to read it. Do not show it as empty, do not send it back. */
+  bodyMissing: boolean;
   project: string;
   kind: string;
   tags: string[];
@@ -87,6 +99,8 @@ export interface SubmitBatch {
   results: SubmitCheck[];
   /** The requests as they are now; only when `ok`. */
   requests: Request[];
+  /** Ids that stayed `open` in openspec-mcp after a failed batch (normally empty). */
+  unreverted?: string[];
 }
 
 export type OrderBy = "UPDATED_DESC" | "UPDATED_ASC" | "PROJECT_ASC" | "PROJECT_DESC";
@@ -99,7 +113,10 @@ export interface RequestFilter {
   orderBy?: OrderBy | null;
 }
 
-/** What `saveDraft` takes. No `id` creates; `id` with `version` updates (a stale version conflicts). */
+/**
+ * What `saveDraft` takes. No `id` creates; `id` with `version` updates (a stale version conflicts).
+ * `title` and `body` left out mean "not changed": a body that was not read is never sent as an empty one.
+ */
 export interface DraftInput {
   id?: string | null;
   version?: number | null;
@@ -122,7 +139,9 @@ export interface RequestRecord {
   protocol: string | null;
   change_ref: string | null;
   lane: LaneName;
-  body: string;
+  /** `null` when `body_missing`. */
+  body: string | null;
+  body_missing?: boolean;
   version: number;
   created_ms: number;
   updated_ms: number;
@@ -190,6 +209,8 @@ export type ServerErrorKind =
 
 /** Information that could not be read. Never show it as "empty". */
 export interface MissingSource {
+  /** What of the request could not be read (`body` …), when the server says. */
+  item?: string | null;
   service: ExternalServiceName;
   kind: ServerErrorKind;
   detail: string;

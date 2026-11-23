@@ -14,7 +14,7 @@ use super::error::{ApiError, ApiErrorKind};
 const MAX_ARGS_BYTES: usize = 2 * 1024 * 1024;
 
 /// Fields of a request, as the server's `GqlRequest` has them.
-const REQUEST_FIELDS: &str = "id version title body project kind tags protocol change lane createdMs updatedMs";
+const REQUEST_FIELDS: &str = "id version title body bodyMissing project kind tags protocol change lane createdMs updatedMs";
 
 /// The allowlist. The names are the server's GraphQL field names. `ALL` and `name` must agree
 /// with `OPERATION_NAMES` in `app/utils/api/operations.ts` (a test in the client checks it).
@@ -174,7 +174,7 @@ impl Operation {
     fn document(self) -> String {
         let f = REQUEST_FIELDS;
         match self {
-            Operation::ServerInfo => "query { serverInfo { version } }".to_owned(),
+            Operation::ServerInfo => "query { serverInfo { version contentBackend contentSupported contentMissingTools contentDetail } }".to_owned(),
             Operation::Requests => "query($filter: RequestFilter) { requests(filter: $filter) { id version title project kind tags lane currentStep updatedMs } }".to_owned(),
             Operation::Request => format!("query($id: String!) {{ request(id: $id) {{ {f} }} }}"),
             Operation::RequestDetail => "query($id: String!) { requestDetail(id: $id) }".to_owned(),
@@ -187,7 +187,7 @@ impl Operation {
             Operation::SaveDraft => format!("mutation($input: SaveDraftInput!) {{ saveDraft(input: $input) {{ {f} }} }}"),
             Operation::SubmitRequest => format!("mutation($id: String!, $version: Int!) {{ submitRequest(id: $id, version: $version) {{ {f} }} }}"),
             Operation::CheckSubmitRequest => "query($id: String!, $version: Int!) { checkSubmitRequest(id: $id, version: $version) { id ok code missing message } }".to_owned(),
-            Operation::SubmitRequests => format!("mutation($items: [SubmitItemInput!]!) {{ submitRequests(items: $items) {{ ok results {{ id ok code missing message }} requests {{ {f} }} }} }}"),
+            Operation::SubmitRequests => format!("mutation($items: [SubmitItemInput!]!) {{ submitRequests(items: $items) {{ ok results {{ id ok code missing message }} unreverted requests {{ {f} }} }} }}"),
             Operation::DecideApproval => "mutation($requestId: String!, $proposalRef: String!, $proposalVersion: Int!, $decision: JSON!) { decideApproval(requestId: $requestId, proposalRef: $proposalRef, proposalVersion: $proposalVersion, decision: $decision) }".to_owned(),
             Operation::AnswerQuestion => "mutation($requestId: String!, $questionId: String!, $choice: String!) { answerQuestion(requestId: $requestId, questionId: $questionId, choice: $choice) }".to_owned(),
             Operation::CreateProject => "mutation($name: String!) { createProject(name: $name) }".to_owned(),
@@ -335,16 +335,18 @@ struct FilterArgs {
     order_by: Option<String>,
 }
 
-/// Missing text fields are empty, like the server's own defaults: a draft may be incomplete.
+/// Missing `project` and `kind` are empty, like the server's own defaults: a draft may be incomplete.
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct SaveDraftArgs {
     id: Option<String>,
     version: Option<i64>,
-    #[serde(default)]
-    title: String,
-    #[serde(default)]
-    body: String,
+    /// Left out = "not changed". The webview leaves out what the user did not touch, and a body
+    /// it could not read: an empty one would overwrite the saved one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    body: Option<String>,
     #[serde(default)]
     project: String,
     #[serde(default)]
@@ -521,13 +523,43 @@ mod tests {
     #[test]
     fn a_draft_may_be_incomplete_and_an_update_carries_its_version() {
         let p = prepare("saveDraft", json!({})).unwrap();
+        // Nothing said about the title and the body: neither is sent (an empty one would replace it).
         assert_eq!(
             p.variables,
-            json!({ "input": { "id": null, "version": null, "title": "", "body": "", "project": "", "kind": "", "tags": [], "protocol": null, "change": null } })
+            json!({ "input": { "id": null, "version": null, "project": "", "kind": "", "tags": [], "protocol": null, "change": null } })
         );
         let p = prepare("saveDraft", json!({ "id": "r1", "version": 3, "title": "t", "tags": ["a"] })).unwrap();
         assert_eq!(p.variables["input"]["id"], "r1");
         assert_eq!(p.variables["input"]["version"], 3);
+    }
+
+    #[test]
+    fn a_body_that_is_left_out_is_not_sent_and_one_that_is_given_is_sent_as_it_is() {
+        // The saved body cannot be read, so an update that did not touch it must not carry one.
+        let p = prepare("saveDraft", json!({ "id": "r1", "version": 3, "title": "t", "project": "p" })).unwrap();
+        let input = p.variables["input"].as_object().unwrap();
+        assert!(!input.contains_key("body"), "{input:?}");
+        let p = prepare("saveDraft", json!({ "id": "r1", "version": 3, "body": "text" })).unwrap();
+        assert_eq!(p.variables["input"]["body"], "text");
+        assert!(!p.variables["input"].as_object().unwrap().contains_key("title"));
+        // An empty body that the user wrote on purpose is a body: it is sent, not dropped.
+        let p = prepare("saveDraft", json!({ "id": "r1", "version": 3, "body": "" })).unwrap();
+        assert_eq!(p.variables["input"]["body"], "");
+        // `null` is "not given" too (never a value that reaches the server as an empty text).
+        let p = prepare("saveDraft", json!({ "id": "r1", "version": 3, "body": null })).unwrap();
+        assert!(!p.variables["input"].as_object().unwrap().contains_key("body"));
+    }
+
+    #[test]
+    fn the_documents_ask_for_what_the_screens_read_of_the_content() {
+        let request = prepare("request", json!({ "id": "r" })).unwrap();
+        assert!(request.document.contains("bodyMissing"));
+        let save = prepare("saveDraft", json!({})).unwrap();
+        assert!(save.document.contains("bodyMissing"));
+        let info = prepare("serverInfo", json!({})).unwrap();
+        for field in ["contentBackend", "contentSupported", "contentMissingTools", "contentDetail"] {
+            assert!(info.document.contains(field), "{field}");
+        }
     }
 
     #[test]
