@@ -888,6 +888,27 @@ mod tests {
         }
 
         #[test]
+        fn a_child_left_in_the_group_when_the_program_ends_first_does_not_outlive_the_time_out() {
+            // The program ends on TERM at once; its child ignores TERM and stays in the group until the KILL.
+            let (answer, _) = sh("(trap '' TERM; exec sleep 300) & echo child=$!; wait", Duration::from_millis(300));
+            let output = answer.unwrap();
+            let pid: u32 = output.text.split("child=").nth(1).and_then(|r| r.split_whitespace().next()).and_then(|n| n.parse().ok()).unwrap_or_else(|| panic!("{:?}", output.text));
+            let mut gone = false;
+            for _ in 0..100 {
+                if !alive(pid) {
+                    gone = true;
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            if !gone {
+                let _ = std::process::Command::new("kill").args(["-9", &pid.to_string()]).status();
+            }
+            assert!(output.timed_out);
+            assert!(gone, "the child {pid} outlived the time-out");
+        }
+
+        #[test]
         fn the_wait_for_the_output_does_not_pass_its_limit_while_a_pipe_is_held() {
             use std::process::Stdio;
             // `sleep` holds its (never written) standard output open, like a child that keeps the pipe.
