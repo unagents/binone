@@ -1,6 +1,6 @@
 [package]
 name = "binone"
-version = "0.3.0"
+version = "0.3.2"
 description = "binone client"
 authors = ["grrow"]
 edition = "2021"
