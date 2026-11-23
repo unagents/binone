@@ -277,18 +277,16 @@ pub fn interpret(output: &RunOutput, limit: Duration) -> Outcome {
         // The CLI's own words: its result when it gave one, else what it wrote to the error output.
         let words = result_text.filter(|t| !t.trim().is_empty()).map(str::to_owned).unwrap_or_else(|| format!("{}{}", output.stderr, output.stdout));
         let lowered = words.to_lowercase();
-        if lowered.contains("not logged in") || lowered.contains("/login") || lowered.contains("authentication") || lowered.contains("api key") {
+        // Only a non-zero exit with the CLI's own "log in" wording; "authentication" or "api key" alone
+        // (a rejected request, a key problem) is some other failure and is shown as such.
+        if output.code != Some(0) && (lowered.contains("not logged in") || lowered.contains("/login")) {
             return notice(
                 NoticeKind::NotLoggedIn,
                 "claude にログインしていません。ターミナルで claude を起動して /login を実行してから、もう一度送ってください。",
                 summary(&words),
             );
         }
-        let message = match output.code {
-            Some(code) if code != 0 => format!("claude がエラーで終わりました（終了 code {code}）。"),
-            _ => "claude がエラーを返しました。".to_owned(),
-        };
-        return notice(NoticeKind::Failed, message, summary(&words));
+        return notice(NoticeKind::Failed, "エージェントの呼び出しに失敗しました。", summary(&words));
     }
 
     let Some(text) = result_text else {
@@ -415,7 +413,7 @@ mod tests {
         let out = ask_with("cat >/dev/null; echo 'something broke' >&2; exit 3", None, Duration::from_secs(10));
         let Outcome::Notice { kind, message, detail } = out else { panic!("expected a notice") };
         assert_eq!(kind, NoticeKind::Failed);
-        assert!(message.contains("終了 code 3"), "{message}");
+        assert_eq!(message, "エージェントの呼び出しに失敗しました。");
         assert_eq!(detail.as_deref(), Some("something broke"));
     }
 
@@ -427,6 +425,25 @@ mod tests {
         assert_eq!(kind, NoticeKind::NotLoggedIn);
         assert!(message.contains("ログインしていません"));
         assert_eq!(detail.as_deref(), Some("Not logged in · Please run /login"));
+    }
+
+    #[test]
+    fn authentication_alone_is_not_taken_for_a_missing_login() {
+        for words in ["authentication_error: invalid x-api-key", "API key rejected", "Authentication failed upstream"] {
+            let json = serde_json::json!({"type": "result", "is_error": true, "result": words}).to_string();
+            let out = ask_with(&format!("cat >/dev/null; printf '%s' '{json}'; exit 1"), None, Duration::from_secs(10));
+            let Outcome::Notice { kind, message, detail } = out else { panic!("expected a notice") };
+            assert_eq!(kind, NoticeKind::Failed, "{words}");
+            assert_eq!(message, "エージェントの呼び出しに失敗しました。");
+            assert_eq!(detail.as_deref(), Some(words));
+        }
+    }
+
+    #[test]
+    fn a_login_instruction_in_the_output_is_named() {
+        let out = ask_with("cat >/dev/null; echo 'run /login to continue' >&2; exit 1", None, Duration::from_secs(10));
+        let Outcome::Notice { kind, .. } = out else { panic!("expected a notice") };
+        assert_eq!(kind, NoticeKind::NotLoggedIn);
     }
 
     #[test]

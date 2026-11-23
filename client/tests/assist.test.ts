@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { BODY_CHANGED_TEXT, TITLE_CHANGED_TEXT, canSend, draftOf, isAssistOutcome, newChat, resetChat, sendMessage, type AssistCall, type AssistOutcome } from "../app/utils/assist";
+import { BODY_CHANGED_TEXT, HELD_TEXT, TITLE_CHANGED_TEXT, applyHeld, canSend, draftOf, isAssistOutcome, newChat, resetChat, sendMessage, type AssistCall, type AssistOutcome } from "../app/utils/assist";
 import { emptyForm } from "../app/utils/requests";
 import { createSampleServer } from "../app/utils/api/sample";
 
@@ -73,6 +73,36 @@ describe("the answer", () => {
     const chat = newChat();
     await sendMessage(chat, form(), "そのまま", replying(answer({ title: "元の題名", body: "元の本文" })));
     expect(chat.lines.some((l) => l.kind === "change")).toBe(false);
+  });
+
+  it("applies at once a field the user has not touched since sending", async () => {
+    const chat = newChat();
+    const f = form();
+    let release!: (v: unknown) => void;
+    const pending = sendMessage(chat, f, "題名を直して", () => new Promise((r) => (release = r)));
+    release(answer({ title: "新しい題名" }));
+    await pending;
+    expect(f.title).toBe("新しい題名");
+    expect(chat.lines.some((l) => l.kind === "held")).toBe(false);
+  });
+
+  it("does not overwrite a field edited while waiting; the button applies it", async () => {
+    const chat = newChat();
+    const f = form();
+    let release!: (v: unknown) => void;
+    const pending = sendMessage(chat, f, "全部直して", () => new Promise((r) => (release = r)));
+    f.title = "利用者が直した題名";
+    release(answer({ title: "新しい題名", body: "新しい本文" }));
+    await pending;
+    // The title was edited: held. The body was not: applied.
+    expect(f.title).toBe("利用者が直した題名");
+    expect(f.body).toBe("新しい本文");
+    const held = chat.lines.find((l) => l.kind === "held");
+    expect(held).toMatchObject({ text: HELD_TEXT, held: { title: "新しい題名" } });
+    applyHeld(chat, f, held!.id);
+    expect(f.title).toBe("新しい題名");
+    expect(held!.held).toBeUndefined();
+    expect(chat.lines.at(-1)).toMatchObject({ kind: "change", text: TITLE_CHANGED_TEXT });
   });
 
   it("an answer for a conversation that was dropped is not applied", async () => {

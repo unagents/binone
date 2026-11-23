@@ -16,7 +16,7 @@ import {
   type DraftForm,
 } from "~/utils/requests";
 import { callNative } from "~/utils/api/transport";
-import { newChat, resetChat, sendMessage } from "~/utils/assist";
+import { applyHeld, newChat, resetChat, sendMessage } from "~/utils/assist";
 import { requestRoute } from "~/utils/routes";
 import { validateProjectName } from "~/utils/settings";
 
@@ -52,6 +52,10 @@ const chat = reactive(newChat());
 const chatEnabled = computed(() => editable.value && !loading.value && !loadError.value);
 function onChatSend(text: string) {
   void sendMessage(chat, form, text, (message, draft, sessionId) => callNative("assist_send", { message, draft, sessionId }));
+}
+
+function onChatApplyHeld(lineId: number) {
+  applyHeld(chat, form, lineId);
 }
 
 const dirty = computed(() => !sameForm(form, savedForm.value));
@@ -350,6 +354,6 @@ async function createProject() {
         </template>
       </ScreenFrame>
     </div>
-    <RequestsAgentPane title="依頼作成支援エージェント" :chat="chat" :enabled="chatEnabled" @send="onChatSend" />
+    <RequestsAgentPane title="依頼作成支援エージェント" :chat="chat" :enabled="chatEnabled" @send="onChatSend" @apply-held="onChatApplyHeld" />
   </div>
 </template>

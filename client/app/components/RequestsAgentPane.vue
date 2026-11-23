@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { WAITING_TEXT, canSend, type Chat } from "~/utils/assist";
+import { APPLY_HELD_TEXT, WAITING_TEXT, canSend, type Chat } from "~/utils/assist";
 
 // The right side of the request screens: the agent's chat. Only the registration screen has a
 // conversation (it passes `chat`); the others show the frame and say it is not connected.
@@ -9,7 +9,7 @@ const props = defineProps<{
   /** Whether a message may be sent now (the form can be edited). */
   enabled?: boolean;
 }>();
-const emit = defineEmits<{ send: [text: string] }>();
+const emit = defineEmits<{ send: [text: string]; applyHeld: [lineId: number] }>();
 
 const text = ref("");
 const listEl = ref<HTMLElement | null>(null);
@@ -47,6 +47,10 @@ watch(
         </p>
         <template v-for="line in chat.lines" :key="line.id">
           <p v-if="line.kind === 'change'" class="text-center text-xs text-primary" data-testid="chat-change">{{ line.text }}</p>
+          <div v-else-if="line.kind === 'held'" class="flex flex-col items-center gap-1 text-center" data-testid="chat-held">
+            <p class="text-xs text-warning">{{ line.text }}</p>
+            <UButton v-if="line.held" size="xs" color="warning" variant="outline" data-testid="chat-held-apply" @click="emit('applyHeld', line.id)">{{ APPLY_HELD_TEXT }}</UButton>
+          </div>
           <div
             v-else
             class="max-w-full whitespace-pre-wrap break-words rounded-md px-3 py-2 text-sm"
